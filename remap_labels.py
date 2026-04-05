@@ -12,6 +12,7 @@
 import argparse
 import sys
 from pathlib import Path
+from typing import Callable
 
 import librosa
 import numpy as np
@@ -25,6 +26,8 @@ EXPAND_RATIO = 3.0
 MIN_ANOMALY_DURATION_S = 2.0
 SCAN_WINDOW_S = 4.0
 DRIFT_WARN_THRESHOLD_S = 1.0
+CHAIN_TOLERANCE = 0.02
+POINT_LABEL_TOLERANCE = 0.001
 
 
 # ── Core logic ─────────────────────────────────────────────────────────────────
@@ -120,6 +123,138 @@ def detect_anomalies(
     return anomalies
 
 
+def load_timestamps(path: str) -> list[float]:
+    """Load first-column timestamps from an Audacity label file.
+
+    Returns a sorted list of unique timestamps.
+    """
+    timestamps: set[float] = set()
+    with open(path) as f:
+        for line in f:
+            line = line.rstrip("\n\r")
+            if not line:
+                continue
+            parts = line.split("\t")
+            if not parts:
+                continue
+            timestamps.add(float(parts[0]))
+    return sorted(timestamps)
+
+
+def snap_to_grid(t: float, grid: np.ndarray) -> float:
+    """Snap timestamp *t* to the nearest point in *grid*."""
+    idx = grid_index(t, grid)
+    return float(grid[idx])
+
+
+def grid_index(t: float, grid: np.ndarray) -> int:
+    """Return the index of the nearest grid point to *t*."""
+    pos = np.searchsorted(grid, t)
+    if pos == 0:
+        return 0
+    if pos >= len(grid):
+        return len(grid) - 1
+    before = grid[pos - 1]
+    after = grid[pos]
+    if (t - before) <= (after - t):
+        return pos - 1
+    return pos
+
+
+def find_chain_segments(
+    labels: list[tuple[float, float, str]],
+) -> list[list[int]]:
+    """Split indexed labels into chain segments.
+
+    A point label (start == end within POINT_LABEL_TOLERANCE) is always
+    isolated (segment of length 1).
+
+    Consecutive range labels where the end of one matches the start of the
+    next within CHAIN_TOLERANCE form a chain segment.
+    """
+    n = len(labels)
+    if n == 0:
+        return []
+
+    def is_point(i: int) -> bool:
+        s, e, _ = labels[i]
+        return abs(e - s) < POINT_LABEL_TOLERANCE
+
+    segments: list[list[int]] = []
+    current_chain: list[int] = []
+
+    for i in range(n):
+        if is_point(i):
+            # Flush any pending chain
+            if current_chain:
+                segments.append(current_chain)
+                current_chain = []
+            segments.append([i])
+            continue
+
+        if not current_chain:
+            current_chain = [i]
+            continue
+
+        prev_end = labels[current_chain[-1]][1]
+        cur_start = labels[i][0]
+        if abs(prev_end - cur_start) < CHAIN_TOLERANCE:
+            current_chain.append(i)
+        else:
+            segments.append(current_chain)
+            current_chain = [i]
+
+    if current_chain:
+        segments.append(current_chain)
+
+    return segments
+
+
+def remap_chain_segment(
+    labels: list[tuple[float, float, str]],
+    indices: list[int],
+    warp: Callable[[float], float],
+    grid: np.ndarray,
+) -> list[tuple[int, tuple[float, float, str]]]:
+    """Remap a chain of contiguous range labels.
+
+    Ensures monotonic grid indices, minimum 1 grid step per label, and exact
+    chaining (each label's end equals the next label's start).
+
+    Returns a list of (original_index, remapped_label) pairs.
+    """
+    n = len(indices)
+
+    # Warp the chain boundary times and snap to grid indices
+    boundary_old_times = [labels[indices[0]][0]]
+    for idx in indices:
+        boundary_old_times.append(labels[idx][1])
+
+    raw_grid_indices = [grid_index(warp(t), grid) for t in boundary_old_times]
+
+    # Enforce monotonic with minimum 1 step per label
+    fixed = [raw_grid_indices[0]]
+    for k in range(1, len(raw_grid_indices)):
+        minimum = fixed[-1] + 1
+        fixed.append(max(raw_grid_indices[k], minimum))
+
+    # Clamp to grid bounds
+    max_idx = len(grid) - 1
+    for k in range(len(fixed)):
+        if fixed[k] > max_idx:
+            fixed[k] = max_idx
+
+    result: list[tuple[int, tuple[float, float, str]]] = []
+    for k in range(n):
+        start_t = float(grid[fixed[k]])
+        end_t = float(grid[fixed[k + 1]])
+        orig_idx = indices[k]
+        lbl = labels[orig_idx][2]
+        result.append((orig_idx, (start_t, end_t, lbl)))
+
+    return result
+
+
 def parse_label_file(path: str) -> list[tuple[float, float, str]]:
     """Parse an Audacity label file (tab-separated: start, end, label)."""
     labels = []
@@ -142,25 +277,48 @@ def remap_labels(
     labels: list[tuple[float, float, str]],
     old_times: np.ndarray,
     new_times: np.ndarray,
+    grid: np.ndarray,
 ) -> list[tuple[float, float, str]]:
-    """Warp label timestamps from old audio to new audio."""
-    remapped = []
-    for start, end, label in labels:
-        new_start = warp_timestamp(start, old_times, new_times)
-        is_point = start == end
-        if is_point:
-            new_end = new_start
+    """Warp label timestamps from old audio to new audio, snapped to grid."""
+
+    def warp(t: float) -> float:
+        return warp_timestamp(t, old_times, new_times)
+
+    segments = find_chain_segments(labels)
+    remapped: list[tuple[float, float, str]] = [("", "", "")] * len(labels)  # type: ignore[list-item]
+
+    for seg in segments:
+        if len(seg) == 1:
+            idx = seg[0]
+            start, end, lbl = labels[idx]
+            is_point = abs(end - start) < POINT_LABEL_TOLERANCE
+            new_start = snap_to_grid(warp(start), grid)
+            if is_point:
+                new_end = new_start
+            else:
+                new_end = snap_to_grid(warp(end), grid)
+                if new_end <= new_start:
+                    gi = grid_index(warp(start), grid)
+                    new_end = float(grid[min(gi + 1, len(grid) - 1)])
+
+            drift = abs(new_start - start)
+            if drift > DRIFT_WARN_THRESHOLD_S:
+                print(
+                    f"  WARNING: label '{lbl}' drifted {drift:.2f}s "
+                    f"(old={start:.3f} -> new={new_start:.3f})"
+                )
+            remapped[idx] = (new_start, new_end, lbl)
         else:
-            new_end = warp_timestamp(end, old_times, new_times)
+            chain_results = remap_chain_segment(labels, seg, warp, grid)
+            for orig_idx, label_tuple in chain_results:
+                drift = abs(label_tuple[0] - labels[orig_idx][0])
+                if drift > DRIFT_WARN_THRESHOLD_S:
+                    print(
+                        f"  WARNING: label '{label_tuple[2]}' drifted {drift:.2f}s "
+                        f"(old={labels[orig_idx][0]:.3f} -> new={label_tuple[0]:.3f})"
+                    )
+                remapped[orig_idx] = label_tuple
 
-        drift = abs(new_start - start)
-        if drift > DRIFT_WARN_THRESHOLD_S:
-            print(
-                f"  WARNING: label '{label}' drifted {drift:.2f}s "
-                f"(old={start:.3f} -> new={new_start:.3f})"
-            )
-
-        remapped.append((new_start, new_end, label))
     return remapped
 
 
@@ -173,11 +331,31 @@ def write_label_file(
             f.write(f"{start:.6f}\t{end:.6f}\t{label}\n")
 
 
+def remap_label_file(
+    lf: str,
+    old_times: np.ndarray,
+    new_times: np.ndarray,
+    grid: np.ndarray,
+    out_path: Path,
+) -> None:
+    """Load, remap, and write a single label file."""
+    lf_path = Path(lf)
+    print(f"Remapping: {lf_path.name}")
+    labels = parse_label_file(lf)
+    remapped = remap_labels(labels, old_times, new_times, grid)
+    dest = out_path / lf_path.name
+    write_label_file(str(dest), remapped)
+    print(f"  -> {dest}")
+
+
 def run(
     old_audio: str,
     new_audio: str,
     label_files: list[str],
     outdir: str,
+    new_beats_path: str,
+    new_bars_path: str | None = None,
+    bar_snap_files: list[str] | None = None,
 ) -> None:
     """Main pipeline: compute DTW, detect anomalies, remap all label files."""
     print(f"Loading old audio: {old_audio}")
@@ -206,17 +384,33 @@ def run(
     else:
         print("  No anomalies detected.")
 
+    # Load grids
+    beat_grid = np.array(load_timestamps(new_beats_path))
+    print(f"Loaded beat grid: {len(beat_grid)} beats")
+
+    bar_grid = None
+    if new_bars_path:
+        bar_grid = np.array(load_timestamps(new_bars_path))
+        print(f"Loaded bar grid: {len(bar_grid)} bars")
+
+    bar_snap_set = set(Path(p).name for p in (bar_snap_files or []))
+
     out_path = Path(outdir)
     out_path.mkdir(parents=True, exist_ok=True)
 
     for lf in label_files:
-        lf_path = Path(lf)
-        print(f"Remapping: {lf_path.name}")
-        labels = parse_label_file(lf)
-        remapped = remap_labels(labels, old_times, new_times)
-        dest = out_path / lf_path.name
-        write_label_file(str(dest), remapped)
-        print(f"  -> {dest}")
+        lf_name = Path(lf).name
+        if lf_name in bar_snap_set:
+            if bar_grid is None:
+                print(
+                    f"  ERROR: --bar-snap requested for '{lf_name}' "
+                    "but no --new-bars provided"
+                )
+                sys.exit(1)
+            grid = bar_grid
+        else:
+            grid = beat_grid
+        remap_label_file(lf, old_times, new_times, grid, out_path)
 
     print("Done.")
 
@@ -236,6 +430,33 @@ if __name__ == "__main__":
         default="remapped/",
         help="Output directory for remapped label files (default: remapped/)",
     )
+    parser.add_argument(
+        "-b",
+        "--new-beats",
+        required=True,
+        help="Audacity label file with new beat timestamps for snapping",
+    )
+    parser.add_argument(
+        "-B",
+        "--new-bars",
+        default=None,
+        help="Audacity label file with new bar timestamps for bar-level snapping",
+    )
+    parser.add_argument(
+        "-s",
+        "--bar-snap",
+        action="append",
+        default=[],
+        help="Label file(s) to snap to bars instead of beats (repeatable)",
+    )
     args = parser.parse_args()
 
-    run(args.old_audio, args.new_audio, args.labels, args.outdir)
+    run(
+        args.old_audio,
+        args.new_audio,
+        args.labels,
+        args.outdir,
+        new_beats_path=args.new_beats,
+        new_bars_path=args.new_bars,
+        bar_snap_files=args.bar_snap,
+    )
