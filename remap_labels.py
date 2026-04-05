@@ -29,6 +29,7 @@ DRIFT_WARN_THRESHOLD_S = 1.0
 CHAIN_TOLERANCE = 0.02
 POINT_LABEL_TOLERANCE = 0.001
 REANCHOR_THRESHOLD_BEATS = 4
+BAR_ALIGN_TOLERANCE = 0.05
 
 
 # ── Core logic ─────────────────────────────────────────────────────────────────
@@ -211,6 +212,21 @@ def find_chain_segments(
     return segments
 
 
+def _is_on_bar(t: float, bar_grid: np.ndarray | None) -> bool:
+    """Return True if *t* snaps to a bar boundary within BAR_ALIGN_TOLERANCE."""
+    if bar_grid is None or len(bar_grid) == 0:
+        return False
+    return abs(snap_to_grid(t, bar_grid) - t) < BAR_ALIGN_TOLERANCE
+
+
+def _snap_to_bar_on_grid(
+    warped_t: float, grid: np.ndarray, bar_grid: np.ndarray
+) -> int:
+    """Snap *warped_t* to the nearest bar boundary and return its index in *grid*."""
+    bar_t = snap_to_grid(warped_t, bar_grid)
+    return grid_index(bar_t, grid)
+
+
 def compute_beat_counts(
     labels: list[tuple[float, float, str]],
     indices: list[int],
@@ -235,13 +251,20 @@ def _remap_chain_preserving_beats(
     warp: Callable[[float], float],
     grid: np.ndarray,
     old_beat_grid: np.ndarray,
+    old_bar_grid: np.ndarray | None = None,
+    new_bar_grid: np.ndarray | None = None,
 ) -> list[tuple[int, tuple[float, float, str]]]:
     """Remap a chain preserving original beat counts per label."""
     n = len(indices)
     beat_counts = compute_beat_counts(labels, indices, old_beat_grid)
 
     # DTW-warp the chain's first start to get cursor position on new grid
-    cursor = grid_index(warp(labels[indices[0]][0]), grid)
+    first_start = labels[indices[0]][0]
+    warped_first = warp(first_start)
+    if _is_on_bar(first_start, old_bar_grid) and new_bar_grid is not None:
+        cursor = _snap_to_bar_on_grid(warped_first, grid, new_bar_grid)
+    else:
+        cursor = grid_index(warped_first, grid)
     max_idx = len(grid) - 1
 
     result: list[tuple[int, tuple[float, float, str]]] = []
@@ -262,7 +285,11 @@ def _remap_chain_preserving_beats(
         # Check drift against DTW for re-anchoring (except after last label)
         if k < n - 1:
             next_start = labels[indices[k + 1]][0]
-            dtw_gi = grid_index(warp(next_start), grid)
+            warped_next = warp(next_start)
+            if _is_on_bar(next_start, old_bar_grid) and new_bar_grid is not None:
+                dtw_gi = _snap_to_bar_on_grid(warped_next, grid, new_bar_grid)
+            else:
+                dtw_gi = grid_index(warped_next, grid)
             if abs(cursor - dtw_gi) > REANCHOR_THRESHOLD_BEATS:
                 print(
                     f"  WARNING: re-anchoring after '{lbl}': "
@@ -286,6 +313,8 @@ def remap_chain_segment(
     warp: Callable[[float], float],
     grid: np.ndarray,
     old_beat_grid: np.ndarray | None = None,
+    old_bar_grid: np.ndarray | None = None,
+    new_bar_grid: np.ndarray | None = None,
 ) -> list[tuple[int, tuple[float, float, str]]]:
     """Remap a chain of contiguous range labels.
 
@@ -299,7 +328,8 @@ def remap_chain_segment(
     """
     if old_beat_grid is not None:
         return _remap_chain_preserving_beats(
-            labels, indices, warp, grid, old_beat_grid
+            labels, indices, warp, grid, old_beat_grid,
+            old_bar_grid=old_bar_grid, new_bar_grid=new_bar_grid,
         )
 
     n = len(indices)
@@ -358,6 +388,8 @@ def remap_labels(
     new_times: np.ndarray,
     grid: np.ndarray,
     old_beat_grid: np.ndarray | None = None,
+    old_bar_grid: np.ndarray | None = None,
+    new_bar_grid: np.ndarray | None = None,
 ) -> list[tuple[float, float, str]]:
     """Warp label timestamps from old audio to new audio, snapped to grid."""
 
@@ -390,7 +422,8 @@ def remap_labels(
             remapped[idx] = (new_start, new_end, lbl)
         else:
             chain_results = remap_chain_segment(
-                labels, seg, warp, grid, old_beat_grid
+                labels, seg, warp, grid, old_beat_grid,
+                old_bar_grid=old_bar_grid, new_bar_grid=new_bar_grid,
             )
             for orig_idx, label_tuple in chain_results:
                 drift = abs(label_tuple[0] - labels[orig_idx][0])
@@ -421,6 +454,8 @@ def remap_label_file(
     out_path: Path,
     old_beat_grid: np.ndarray | None = None,
     use_bar_snap: bool = False,
+    old_bar_grid: np.ndarray | None = None,
+    bar_grid: np.ndarray | None = None,
 ) -> None:
     """Load, remap, and write a single label file."""
     lf_path = Path(lf)
@@ -428,7 +463,10 @@ def remap_label_file(
     labels = parse_label_file(lf)
     # Beat-count preservation only when NOT bar-snapping
     old_grid_for_counts = None if use_bar_snap else old_beat_grid
-    remapped = remap_labels(labels, old_times, new_times, grid, old_grid_for_counts)
+    remapped = remap_labels(
+        labels, old_times, new_times, grid, old_grid_for_counts,
+        old_bar_grid=old_bar_grid, new_bar_grid=bar_grid,
+    )
     dest = out_path / lf_path.name
     write_label_file(str(dest), remapped)
     print(f"  -> {dest}")
@@ -443,6 +481,7 @@ def run(
     new_bars_path: str | None = None,
     bar_snap_files: list[str] | None = None,
     old_beats_path: str | None = None,
+    old_bars_path: str | None = None,
 ) -> None:
     """Main pipeline: compute DTW, detect anomalies, remap all label files."""
     print(f"Loading old audio: {old_audio}")
@@ -486,6 +525,12 @@ def run(
         print(f"Loaded old beat grid: {len(old_beat_grid)} beats")
         print("Beat-count preservation ON")
 
+    old_bar_grid = None
+    if old_bars_path:
+        old_bar_grid = np.array(load_timestamps(old_bars_path))
+        print(f"Loaded old bar grid: {len(old_bar_grid)} bars")
+        print("Bar-boundary alignment ON")
+
     bar_snap_set = set(Path(p).name for p in (bar_snap_files or []))
 
     out_path = Path(outdir)
@@ -507,6 +552,7 @@ def run(
         remap_label_file(
             lf, old_times, new_times, grid, out_path,
             old_beat_grid=old_beat_grid, use_bar_snap=use_bar_snap,
+            old_bar_grid=old_bar_grid, bar_grid=bar_grid,
         )
 
     print("Done.")
@@ -552,6 +598,12 @@ if __name__ == "__main__":
         default=None,
         help="Audacity label file with old beat timestamps (enables beat-count preservation)",
     )
+    parser.add_argument(
+        "-R",
+        "--old-bars",
+        default=None,
+        help="Audacity label file with old bar timestamps (enables bar-boundary alignment for chain starts)",
+    )
     args = parser.parse_args()
 
     run(
@@ -563,4 +615,5 @@ if __name__ == "__main__":
         new_bars_path=args.new_bars,
         bar_snap_files=args.bar_snap,
         old_beats_path=args.old_beats,
+        old_bars_path=args.old_bars,
     )
