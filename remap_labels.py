@@ -30,7 +30,9 @@ import argparse
 import sys
 from pathlib import Path
 
-import librosa
+from dataclasses import dataclass
+from fractions import Fraction
+
 import numpy as np
 
 
@@ -66,7 +68,9 @@ def load_timestamps(path: str) -> list[float]:
 
 
 def compute_alignment(old_audio: str, new_audio: str):
-    """Compute DTW alignment. Returns (warp_func, old_times, new_times) from the path."""
+    """Compute DTW alignment. Returns (old_times, new_times) from the path."""
+    import librosa
+
     print(f"Loading old audio: {old_audio}")
     y_old, _ = librosa.load(old_audio, sr=SAMPLE_RATE)
     print(f"Loading new audio: {new_audio}")
@@ -204,6 +208,304 @@ def grid_index(t: float, grid: list[float]) -> int:
 # Tolerance for detecting chained labels (end of one == start of next)
 CHAIN_TOLERANCE = 0.02
 
+# Tolerance for matching a timestamp to a grid point
+GRID_MATCH_TOLERANCE = 0.05
+
+
+# -- v6: Musical-structure data types and functions --
+
+
+@dataclass
+class LabelEntry:
+    """A parsed Audacity label."""
+
+    start: float
+    end: float
+    label: str
+
+    @property
+    def is_point(self) -> bool:
+        return abs(self.end - self.start) < 0.001
+
+
+@dataclass
+class SectionEntry:
+    """A label entry relative to its section, measured in bars (Fraction)."""
+
+    bar_offset: Fraction
+    label: str
+    is_point: bool
+    bar_count: Fraction  # Fraction(0) for point labels
+
+
+@dataclass
+class MappedSection:
+    """A section mapped to the new bar grid."""
+
+    name: str
+    new_bar_idx: int  # index into new_bar_grid
+
+
+def _beats_in_bar(bar_idx: int, beat_grid: list[float], bar_grid: list[float]) -> list[int]:
+    """Return beat grid indices that fall within the given bar."""
+    bar_start = bar_grid[bar_idx]
+    bar_end = bar_grid[bar_idx + 1] if bar_idx + 1 < len(bar_grid) else float("inf")
+    result = []
+    start_beat = grid_index(bar_start, beat_grid)
+    for i in range(start_beat, len(beat_grid)):
+        if beat_grid[i] >= bar_end - GRID_MATCH_TOLERANCE:
+            break
+        if beat_grid[i] >= bar_start - GRID_MATCH_TOLERANCE:
+            result.append(i)
+    return result
+
+
+def _find_bar_for_time(t: float, bar_grid: list[float]) -> int:
+    """Return the 0-based index of the bar that contains time t."""
+    idx = grid_index(t, bar_grid)
+    if idx < len(bar_grid) - 1 and bar_grid[idx] > t + GRID_MATCH_TOLERANCE:
+        idx = max(idx - 1, 0)
+    return idx
+
+
+def _beat_position_in_bar(
+    t: float, bar_idx: int, beat_grid: list[float], bar_grid: list[float],
+) -> int:
+    """Return which beat (0-indexed) within a bar the time t falls on."""
+    bar_beats = _beats_in_bar(bar_idx, beat_grid, bar_grid)
+    for pos, beat_idx in enumerate(bar_beats):
+        if abs(beat_grid[beat_idx] - t) < GRID_MATCH_TOLERANCE:
+            return pos
+    return 0
+
+
+def parse_section_entries(
+    chords: list[LabelEntry],
+    beat_grid: list[float],
+    bar_grid: list[float],
+    beats_per_bar: int,
+    section_start: float,
+    section_end: float,
+) -> list[SectionEntry]:
+    """Extract chord/label entries within a section as bar offsets.
+
+    Uses the bar grid directly: bar_offset = (chord's bar index) - (section start bar index).
+    Sub-bar position from beat position within the bar.
+    Duration from beat counting, expressed in bars.
+    """
+    section_start_bar = _find_bar_for_time(section_start, bar_grid)
+    entries = []
+    for chord in chords:
+        if chord.start < section_start - GRID_MATCH_TOLERANCE:
+            continue
+        if chord.start >= section_end - GRID_MATCH_TOLERANCE:
+            continue
+
+        chord_bar = _find_bar_for_time(chord.start, bar_grid)
+        rel_bar = chord_bar - section_start_bar
+        beat_in_bar = _beat_position_in_bar(
+            chord.start, chord_bar, beat_grid, bar_grid,
+        )
+        bar_offset = Fraction(rel_bar) + Fraction(beat_in_bar, beats_per_bar)
+
+        if chord.is_point:
+            entries.append(SectionEntry(
+                bar_offset=bar_offset,
+                label=chord.label,
+                is_point=True,
+                bar_count=Fraction(0),
+            ))
+        else:
+            start_beat = grid_index(chord.start, beat_grid)
+            end_beat = grid_index(chord.end, beat_grid)
+            beat_count = max(end_beat - start_beat, 1)
+            bar_count = Fraction(beat_count, beats_per_bar)
+            entries.append(SectionEntry(
+                bar_offset=bar_offset,
+                label=chord.label,
+                is_point=False,
+                bar_count=bar_count,
+            ))
+    return entries
+
+
+def reconstruct_section(
+    entries: list[SectionEntry],
+    beat_grid: list[float],
+    bar_grid: list[float],
+    beats_per_bar: int,
+    section_start_bar: int,
+    section_end_bar: int,
+) -> tuple[list[LabelEntry], list[str]]:
+    """Reconstruct label entries on new bar/beat grids.
+
+    Positions chords using bar grid (whole bars) + beat grid (sub-bar).
+    A chord at bar_offset 21.5 goes at: bar_grid[start + 21], beat 2.
+
+    Returns (labels, warnings).
+    """
+    warnings = []
+    labels = []
+    for entry in entries:
+        whole_bars = int(entry.bar_offset)
+        frac_beats = int((entry.bar_offset - whole_bars) * beats_per_bar)
+        abs_bar = section_start_bar + whole_bars
+
+        if abs_bar >= len(bar_grid) or abs_bar >= section_end_bar:
+            warnings.append(
+                f"'{entry.label}' at bar {entry.bar_offset} dropped"
+            )
+            continue
+
+        # Find beat within bar
+        bar_beats = _beats_in_bar(abs_bar, beat_grid, bar_grid)
+        if frac_beats < len(bar_beats):
+            start_time = beat_grid[bar_beats[frac_beats]]
+        else:
+            start_time = bar_grid[abs_bar]
+
+        if entry.is_point:
+            labels.append(LabelEntry(start_time, start_time, entry.label))
+            continue
+
+        # Compute end time using bar_count
+        end_whole_bars = int(entry.bar_count)
+        end_frac_beats = int((entry.bar_count - end_whole_bars) * beats_per_bar)
+        end_abs_bar = abs_bar + end_whole_bars
+
+        # Determine end beat position
+        end_beat_offset = frac_beats + end_frac_beats
+        end_bar_from_beat = end_beat_offset // beats_per_bar
+        end_beat_in_bar = end_beat_offset % beats_per_bar
+        end_abs_bar += end_bar_from_beat
+
+        if end_abs_bar > section_end_bar:
+            if abs_bar < section_end_bar:
+                end_time = bar_grid[section_end_bar] if section_end_bar < len(bar_grid) else beat_grid[-1]
+                warnings.append(
+                    f"'{entry.label}' at bar {entry.bar_offset} "
+                    f"(+{entry.bar_count} bars) truncated to section end"
+                )
+            else:
+                warnings.append(
+                    f"'{entry.label}' at bar {entry.bar_offset} "
+                    f"starts beyond section end (dropped)"
+                )
+                continue
+        elif end_abs_bar >= len(bar_grid):
+            warnings.append(
+                f"'{entry.label}' at bar {entry.bar_offset} "
+                f"exceeds grid (dropped)"
+            )
+            continue
+        elif end_beat_in_bar == 0:
+            # Ends on a bar boundary
+            end_time = bar_grid[end_abs_bar]
+        else:
+            end_bar_beats = _beats_in_bar(end_abs_bar, beat_grid, bar_grid)
+            if end_beat_in_bar < len(end_bar_beats):
+                end_time = beat_grid[end_bar_beats[end_beat_in_bar]]
+            else:
+                end_time = bar_grid[end_abs_bar]
+
+        labels.append(LabelEntry(start_time, end_time, entry.label))
+
+    # Detect empty bars at end of section
+    range_labels = [lbl for lbl in labels if not lbl.is_point]
+    if range_labels and section_end_bar < len(bar_grid):
+        last_end = max(lbl.end for lbl in range_labels)
+        last_bar = _find_bar_for_time(last_end, bar_grid)
+        if last_bar < section_end_bar - 1:
+            empty_start = last_bar + 2  # 1-indexed
+            empty_end = section_end_bar  # 1-indexed
+            warnings.append(
+                f"bars {empty_start}-{empty_end} empty "
+                f"(section has {section_end_bar - last_bar - 1} extra bars)"
+            )
+
+    return labels, warnings
+
+
+def validate_bar_beats(
+    old_beat_grid: list[float],
+    old_bar_grid: list[float],
+    new_beat_grid: list[float],
+    new_bar_grid: list[float],
+) -> list[str]:
+    """Compare beats-per-bar between old and new grids.
+
+    Returns warnings for bar count mismatches and per-bar beat count
+    differences.
+    """
+    warnings = []
+
+    if len(old_bar_grid) != len(new_bar_grid):
+        warnings.append(
+            f"Bar count mismatch: old has {len(old_bar_grid)} bars, "
+            f"new has {len(new_bar_grid)} bars"
+        )
+
+    n_bars = min(len(old_bar_grid), len(new_bar_grid))
+    for i in range(n_bars):
+        old_beats = _beats_in_bar(i, old_beat_grid, old_bar_grid)
+        new_beats = _beats_in_bar(i, new_beat_grid, new_bar_grid)
+        if len(old_beats) != len(new_beats):
+            warnings.append(
+                f"Bar {i + 1}: old has {len(old_beats)} beats, "
+                f"new has {len(new_beats)} beats"
+            )
+
+    return warnings
+
+
+def _old_section_bar_count(
+    section_start: float,
+    section_end: float,
+    bar_grid: list[float],
+) -> int:
+    """Count how many bars an old section spans."""
+    start_bar = _find_bar_for_time(section_start, bar_grid)
+    end_bar = _find_bar_for_time(section_end, bar_grid)
+    return max(end_bar - start_bar, 1)
+
+
+def map_section_boundaries(
+    old_parts: list[LabelEntry],
+    warp: callable,
+    new_bar_grid: list[float],
+    old_bar_grid: list[float] | None = None,
+) -> list[MappedSection]:
+    """Map old section starts to new bar positions.
+
+    Uses DTW to position the first section, then places subsequent
+    sections contiguously based on old section bar counts. This
+    prevents gaps between sections caused by DTW imprecision.
+    """
+    if not old_parts:
+        return []
+
+    # DTW for the first section
+    warped = warp(old_parts[0].start)
+    first_bar = grid_index(warped, new_bar_grid)
+    result = [MappedSection(name=old_parts[0].label, new_bar_idx=first_bar)]
+
+    # Subsequent sections: place contiguously
+    cursor = first_bar
+    for i in range(1, len(old_parts)):
+        if old_bar_grid is not None:
+            prev_bars = _old_section_bar_count(
+                old_parts[i - 1].start, old_parts[i - 1].end, old_bar_grid,
+            )
+        else:
+            # Fallback to DTW if no old bar grid
+            warped = warp(old_parts[i].start)
+            prev_bars = grid_index(warped, new_bar_grid) - cursor
+        cursor += prev_bars
+        cursor = min(cursor, len(new_bar_grid) - 1)
+        result.append(MappedSection(name=old_parts[i].label, new_bar_idx=cursor))
+
+    return result
+
 # Tolerance for detecting if a timestamp falls on a bar boundary
 BAR_ALIGN_TOLERANCE = 0.05
 
@@ -336,9 +638,9 @@ def remap_chain_segment(
         cursor = snap_end_idx
 
     for i in range(len(result) - 1):
-        s, _e, l = result[i]
-        next_s = result[i + 1][0]
-        result[i] = (s, next_s, l)
+        start, _end, lbl = result[i]
+        next_start = result[i + 1][0]
+        result[i] = (start, next_start, lbl)
 
     return result, warnings, []  # no review marks for fallback path
 
@@ -441,9 +743,9 @@ def _remap_chain_preserving_beats(
 
     # Enforce exact chain
     for i in range(len(result) - 1):
-        s, _e, l = result[i]
-        next_s = result[i + 1][0]
-        result[i] = (s, next_s, l)
+        start, _end, lbl = result[i]
+        next_start = result[i + 1][0]
+        result[i] = (start, next_start, lbl)
 
     return result, warnings, review_marks
 
@@ -496,8 +798,8 @@ def remap_label_file(
             )
             warnings.extend(seg_warnings)
             review_marks.extend(seg_reviews)
-            for s, e, l in remapped:
-                out_lines.append(format_label(s, e, l))
+            for start, end, lbl in remapped:
+                out_lines.append(format_label(start, end, lbl))
         else:
             # Single label (point or isolated range)
             for _idx, start, end, label in seg:
@@ -564,7 +866,7 @@ def main(
     anomalies = detect_anomalies(old_times, new_times)
     if anomalies:
         print(f"\n{'='*60}")
-        print(f"STRUCTURAL CHANGES DETECTED - manual review needed:")
+        print("STRUCTURAL CHANGES DETECTED - manual review needed:")
         print(f"{'='*60}")
         for a in anomalies:
             if a["type"] == "added":
@@ -617,9 +919,191 @@ def main(
     print(f"\nDone. Check {outdir}/ and verify in Audacity.")
 
 
+def load_labels(path: str) -> list[LabelEntry]:
+    """Load an Audacity label file into LabelEntry list."""
+    entries = []
+    for line in Path(path).read_text().splitlines():
+        parsed = parse_label_line(line)
+        if parsed is not None:
+            start, end, label = parsed
+            entries.append(LabelEntry(start, end, label))
+    return entries
+
+
+def main_v6(
+    old_audio: str,
+    new_audio: str,
+    new_beats_path: str,
+    new_bars_path: str,
+    old_beats_path: str,
+    old_bars_path: str,
+    old_parts_path: str,
+    label_files: list[str],
+    outdir: str,
+) -> None:
+    """v6: Musical-structure reconstruction.
+
+    Uses DTW only at section level. Within sections, reconstructs
+    chord/label patterns from bar offsets on the new grid.
+    """
+    # Load grids
+    new_beat_grid = load_timestamps(new_beats_path)
+    new_bar_grid = load_timestamps(new_bars_path)
+    old_beat_grid = load_timestamps(old_beats_path)
+    old_bar_grid = load_timestamps(old_bars_path)
+    old_parts = load_labels(old_parts_path)
+
+    beats_per_bar = round(len(old_beat_grid) / max(len(old_bar_grid), 1))
+    print(f"Beats per bar: {beats_per_bar}")
+    print(f"New: {len(new_beat_grid)} beats, {len(new_bar_grid)} bars")
+    print(f"Old: {len(old_beat_grid)} beats, {len(old_bar_grid)} bars")
+    print(f"Old parts: {len(old_parts)} sections")
+
+    # Validate beat consistency between old and new
+    val_warnings = validate_bar_beats(
+        old_beat_grid, old_bar_grid, new_beat_grid, new_bar_grid,
+    )
+    if val_warnings:
+        print(f"\n{'='*60}")
+        print("GRID VALIDATION WARNINGS:")
+        print(f"{'='*60}")
+        for w in val_warnings:
+            print(f"  {w}")
+        print(f"{'='*60}")
+
+    # Compute DTW alignment
+    old_times, new_times = compute_alignment(old_audio, new_audio)
+    warp = make_warp_func(old_times, new_times)
+
+    # Map section boundaries to new bars
+    mapped_sections = map_section_boundaries(old_parts, warp, new_bar_grid, old_bar_grid)
+    print("\nSection mapping:")
+    for ms, op in zip(mapped_sections, old_parts):
+        print(f"  {ms.name}: old {op.start:.1f}s -> new bar {ms.new_bar_idx + 1} ({new_bar_grid[ms.new_bar_idx]:.1f}s)")
+
+    # Detect structural anomalies
+    print("\nChecking for structural changes...")
+    anomalies = detect_anomalies(old_times, new_times)
+    if anomalies:
+        print(f"\n{'='*60}")
+        print("STRUCTURAL CHANGES DETECTED - manual review needed:")
+        print(f"{'='*60}")
+        for a in anomalies:
+            if a["type"] == "added":
+                print(
+                    f"  ADDED: new audio {a['new_start']:.1f}-{a['new_end']:.1f}s"
+                )
+            else:
+                print(
+                    f"  REMOVED: old audio {a['old_start']:.1f}-{a['old_end']:.1f}s"
+                )
+        print(f"{'='*60}")
+    else:
+        print("No major structural changes detected.")
+
+    def time_to_bar_beat(t):
+        """Convert a time to 'bar N beat K' string using new grids."""
+        bar_idx = _find_bar_for_time(t, new_bar_grid)
+        bar_num = bar_idx + 1
+        beat_pos = _beat_position_in_bar(t, bar_idx, new_beat_grid, new_bar_grid)
+        if beat_pos == 0:
+            return f"bar {bar_num}"
+        return f"bar {bar_num} beat {beat_pos + 1}"
+
+    # Seed review marks from structural anomalies
+    all_review_marks = []
+    for a in anomalies:
+        start_bb = time_to_bar_beat(a["new_start"])
+        if a["type"] == "added":
+            end_bb = time_to_bar_beat(a["new_end"])
+            all_review_marks.append((
+                a["new_start"],
+                f"new has extra section {start_bb} - {end_bb}",
+            ))
+        else:
+            end_bb = time_to_bar_beat(a["new_end"])
+            all_review_marks.append((
+                a["new_start"],
+                f"old section missing from new, was here ({start_bb} - {end_bb})",
+            ))
+
+    # Process each label file
+    print(f"\nReconstructing {len(label_files)} label file(s):")
+    all_warnings = []
+
+    for lf in label_files:
+        name = Path(lf).name
+        out_path = str(Path(outdir) / name)
+        old_labels = load_labels(lf)
+
+        out_labels = []
+        file_warnings = []
+
+        for sec_idx, (ms, op) in enumerate(zip(mapped_sections, old_parts)):
+            # Parse entries in this section from old labels
+            entries = parse_section_entries(
+                old_labels, old_beat_grid, old_bar_grid,
+                beats_per_bar, op.start, op.end,
+            )
+            if not entries:
+                continue
+
+            # Section end bar = next section's start bar, or end of grid
+            if sec_idx + 1 < len(mapped_sections):
+                sec_end_bar = mapped_sections[sec_idx + 1].new_bar_idx
+            else:
+                sec_end_bar = len(new_bar_grid) - 1
+
+            # Reconstruct
+            labels, warnings = reconstruct_section(
+                entries, new_beat_grid, new_bar_grid, beats_per_bar,
+                ms.new_bar_idx, sec_end_bar,
+            )
+            out_labels.extend(labels)
+
+            # Prefix warnings with section name
+            for w in warnings:
+                file_warnings.append(f"  [{ms.name}] {w}")
+
+            # Add review marks for any warnings
+            for w in warnings:
+                all_review_marks.append((
+                    new_bar_grid[ms.new_bar_idx],
+                    f"[{ms.name}] {w}",
+                ))
+
+        # Write output
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        out_lines = [
+            format_label(le.start, le.end, le.label) for le in out_labels
+        ]
+        Path(out_path).write_text("\n".join(out_lines) + "\n")
+        print(f"  {name} -> {out_path} ({len(out_labels)} labels)")
+        all_warnings.extend(file_warnings)
+
+    # Write review track (deduplicated)
+    unique_marks = list(dict.fromkeys(all_review_marks))
+    if unique_marks:
+        review_path = str(Path(outdir) / "review.txt")
+        review_lines = []
+        for t, desc in sorted(unique_marks):
+            review_lines.append(f"{t:.6f}\t{t:.6f}\t{desc}")
+        Path(review_path).write_text("\n".join(review_lines) + "\n")
+        print(f"\n  review track -> {review_path} ({len(unique_marks)} marks)")
+
+    if all_warnings:
+        print(f"\n{'='*60}")
+        print("WARNINGS:")
+        print(f"{'='*60}")
+        for w in all_warnings:
+            print(w)
+
+    print(f"\nDone. Check {outdir}/ and verify in Audacity.")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Hybrid DTW + beat-grid label remapping for Audacity."
+        description="Remap Audacity labels from old audio to new audio."
     )
     parser.add_argument("old_audio", help="Original audio file")
     parser.add_argument("new_audio", help="New (replacement) audio file")
@@ -628,23 +1112,23 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-b", "--new-beats", required=True,
-        help="New beats file (from DBNBeatTracker on new audio)",
+        help="New beats file",
     )
     parser.add_argument(
-        "-B", "--new-bars",
-        help="New bars file (from beats2bars.py on new beats)",
+        "-B", "--new-bars", required=True,
+        help="New bars file",
     )
     parser.add_argument(
-        "--old-beats",
-        help="Old beats file - enables beat-count preservation for chains",
+        "--old-beats", required=True,
+        help="Old beats file",
     )
     parser.add_argument(
-        "--old-bars",
-        help="Old bars file - ensures chain starts stay on bar boundaries",
+        "--old-bars", required=True,
+        help="Old bars file",
     )
     parser.add_argument(
-        "-s", "--bar-snap", action="append", default=[],
-        help="Label file(s) to snap to bars instead of beats (repeatable)",
+        "-p", "--old-parts", required=True,
+        help="Old parts file (section boundaries)",
     )
     parser.add_argument(
         "-o", "--outdir", default="remapped",
@@ -656,16 +1140,14 @@ if __name__ == "__main__":
         print("Error: provide at least one label file to remap.", file=sys.stderr)
         sys.exit(1)
 
-    bar_snap_files = set(args.bar_snap)
-
-    main(
+    main_v6(
         args.old_audio,
         args.new_audio,
         args.new_beats,
         args.new_bars,
         args.old_beats,
         args.old_bars,
+        args.old_parts,
         args.labels,
-        bar_snap_files,
         args.outdir,
     )
