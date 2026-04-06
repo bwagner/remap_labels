@@ -26,14 +26,36 @@ Usage:
 Output goes to <outdir>/<original_name> (default: remapped/).
 """
 
-import argparse
+import subprocess
 import sys
-from pathlib import Path
-
 from dataclasses import dataclass
 from fractions import Fraction
+from pathlib import Path
 
 import numpy as np
+
+__version__ = "0.7.0"
+
+
+def get_version_info(version):
+    """Return version string enriched with git commit, dirty flag, and timestamp."""
+    try:
+        rev = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        ts = subprocess.check_output(
+            ["git", "log", "-1", "--format=%ai"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        suffix = "-dirty" if dirty else ""
+        return f"{version} (git:{rev}{suffix}, {ts})"
+    except Exception:
+        return version
 
 
 SAMPLE_RATE = 22050
@@ -424,6 +446,65 @@ def reconstruct_section(
             )
 
     return labels, warnings
+
+
+def parse_labels_to_bar_beat(
+    labels: list[LabelEntry],
+    beat_grid: list[float],
+    bar_grid: list[float],
+) -> list[SectionEntry]:
+    """Parse labels into absolute (bar, beat) positions.
+
+    Each label gets a bar_offset (Fraction) representing its absolute
+    position in the song: bar index + beat-within-bar / beats-per-bar.
+    No section logic - positions are absolute.
+    """
+    entries = []
+    for label in labels:
+        chord_bar = _find_bar_for_time(label.start, bar_grid)
+        beat_in_bar = _beat_position_in_bar(
+            label.start, chord_bar, beat_grid, bar_grid,
+        )
+        bar_beats = _beats_in_bar(chord_bar, beat_grid, bar_grid)
+        beats_per_bar = max(len(bar_beats), 1)
+        bar_offset = Fraction(chord_bar) + Fraction(beat_in_bar, beats_per_bar)
+
+        if label.is_point:
+            entries.append(SectionEntry(
+                bar_offset=bar_offset,
+                label=label.label,
+                is_point=True,
+                bar_count=Fraction(0),
+            ))
+        else:
+            start_beat = grid_index(label.start, beat_grid)
+            end_beat = grid_index(label.end, beat_grid)
+            beat_count = max(end_beat - start_beat, 1)
+            bar_count = Fraction(beat_count, beats_per_bar)
+            entries.append(SectionEntry(
+                bar_offset=bar_offset,
+                label=label.label,
+                is_point=False,
+                bar_count=bar_count,
+            ))
+    return entries
+
+
+def reconstruct_labels(
+    entries: list[SectionEntry],
+    beat_grid: list[float],
+    bar_grid: list[float],
+    beats_per_bar: int,
+) -> tuple[list[LabelEntry], list[str]]:
+    """Reconstruct labels on a new bar/beat grid from absolute positions.
+
+    Each entry's bar_offset is absolute (not section-relative).
+    Uses bar grid for bar positions, beat grid for sub-bar.
+    """
+    return reconstruct_section(
+        entries, beat_grid, bar_grid, beats_per_bar,
+        section_start_bar=0, section_end_bar=len(bar_grid),
+    )
 
 
 def validate_bar_beats(
@@ -1101,9 +1182,170 @@ def main_v6(
     print(f"\nDone. Check {outdir}/ and verify in Audacity.")
 
 
+def main_v7(
+    old_audio: str,
+    new_audio: str,
+    new_beats_path: str,
+    new_bars_path: str,
+    old_beats_path: str,
+    old_bars_path: str,
+    label_files: list[str],
+    outdir: str,
+) -> None:
+    """v7: Direct bar/beat remapping without sections.
+
+    Each label is parsed to absolute (bar, beat), DTW finds bar 1 offset,
+    labels are shifted and placed on the new grid.
+    """
+    # Load grids
+    new_beat_grid = load_timestamps(new_beats_path)
+    new_bar_grid = load_timestamps(new_bars_path)
+    old_beat_grid = load_timestamps(old_beats_path)
+    old_bar_grid = load_timestamps(old_bars_path)
+
+    beats_per_bar = round(len(old_beat_grid) / max(len(old_bar_grid), 1))
+    print(f"Beats per bar: {beats_per_bar}")
+    print(f"New: {len(new_beat_grid)} beats, {len(new_bar_grid)} bars")
+    print(f"Old: {len(old_beat_grid)} beats, {len(old_bar_grid)} bars")
+
+    # Validate beat consistency
+    val_warnings = validate_bar_beats(
+        old_beat_grid, old_bar_grid, new_beat_grid, new_bar_grid,
+    )
+    if val_warnings:
+        print(f"\n{'='*60}")
+        print("GRID VALIDATION WARNINGS:")
+        print(f"{'='*60}")
+        for w in val_warnings:
+            print(f"  {w}")
+        print(f"{'='*60}")
+
+    # Compute DTW to find bar offset between old and new
+    old_times, new_times = compute_alignment(old_audio, new_audio)
+    warp = make_warp_func(old_times, new_times)
+
+    # Find where old bar 0 maps to in new
+    warped_first = warp(old_bar_grid[0])
+    new_first_bar = grid_index(warped_first, new_bar_grid)
+    bar_shift = new_first_bar - 0  # how many bars to shift
+    print(f"\nBar shift: old bar 1 -> new bar {new_first_bar + 1} "
+          f"(shift={bar_shift:+d})")
+
+    # Detect structural anomalies
+    print("\nChecking for structural changes...")
+    anomalies = detect_anomalies(old_times, new_times)
+
+    def time_to_bar_beat(t):
+        bar_idx = _find_bar_for_time(t, new_bar_grid)
+        bar_num = bar_idx + 1
+        beat_pos = _beat_position_in_bar(t, bar_idx, new_beat_grid, new_bar_grid)
+        if beat_pos == 0:
+            return f"bar {bar_num}"
+        return f"bar {bar_num} beat {beat_pos + 1}"
+
+    if anomalies:
+        print(f"\n{'='*60}")
+        print("STRUCTURAL CHANGES DETECTED - manual review needed:")
+        print(f"{'='*60}")
+        for a in anomalies:
+            if a["type"] == "added":
+                print(f"  ADDED: {time_to_bar_beat(a['new_start'])} - "
+                      f"{time_to_bar_beat(a['new_end'])}")
+            else:
+                print(f"  REMOVED: old {a['old_start']:.1f}-{a['old_end']:.1f}s")
+        print(f"{'='*60}")
+    else:
+        print("No major structural changes detected.")
+
+    # Seed review marks from anomalies
+    all_review_marks = []
+    for a in anomalies:
+        start_bb = time_to_bar_beat(a["new_start"])
+        if a["type"] == "added":
+            end_bb = time_to_bar_beat(a["new_end"])
+            all_review_marks.append((
+                a["new_start"],
+                f"new has extra section {start_bb} - {end_bb}",
+            ))
+        else:
+            end_bb = time_to_bar_beat(a["new_end"])
+            all_review_marks.append((
+                a["new_start"],
+                f"old section missing from new, was here ({start_bb} - {end_bb})",
+            ))
+
+    # Process each label file
+    print(f"\nReconstructing {len(label_files)} label file(s):")
+    all_warnings = []
+
+    for lf in label_files:
+        name = Path(lf).name
+        out_path = str(Path(outdir) / name)
+        old_labels = load_labels(lf)
+
+        # Parse to absolute bar/beat positions
+        entries = parse_labels_to_bar_beat(
+            old_labels, old_beat_grid, old_bar_grid,
+        )
+
+        # Apply bar shift
+        shifted = [
+            SectionEntry(
+                bar_offset=e.bar_offset + bar_shift,
+                label=e.label,
+                is_point=e.is_point,
+                bar_count=e.bar_count,
+            )
+            for e in entries
+        ]
+
+        # Reconstruct on new grid
+        labels, warnings = reconstruct_labels(
+            shifted, new_beat_grid, new_bar_grid, beats_per_bar,
+        )
+
+        # Write output
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        out_lines = [
+            format_label(le.start, le.end, le.label) for le in labels
+        ]
+        Path(out_path).write_text("\n".join(out_lines) + "\n")
+        print(f"  {name} -> {out_path} ({len(labels)} labels)")
+
+        all_warnings.extend(warnings)
+        for w in warnings:
+            # Extract bar number from warning for review mark positioning
+            all_review_marks.append((0.0, w))
+
+    # Write review track (deduplicated)
+    unique_marks = list(dict.fromkeys(all_review_marks))
+    if unique_marks:
+        review_path = str(Path(outdir) / "review.txt")
+        review_lines = []
+        for t, desc in sorted(unique_marks):
+            review_lines.append(f"{t:.6f}\t{t:.6f}\t{desc}")
+        Path(review_path).write_text("\n".join(review_lines) + "\n")
+        print(f"\n  review track -> {review_path} ({len(unique_marks)} marks)")
+
+    if all_warnings:
+        print(f"\n{'='*60}")
+        print("WARNINGS:")
+        print(f"{'='*60}")
+        for w in all_warnings:
+            print(f"  {w}")
+
+    print(f"\nDone. Check {outdir}/ and verify in Audacity.")
+
+
 if __name__ == "__main__":
+    import argparse
+
     parser = argparse.ArgumentParser(
         description="Remap Audacity labels from old audio to new audio."
+    )
+    parser.add_argument(
+        "-V", "--version", action="version",
+        version=get_version_info(__version__),
     )
     parser.add_argument("old_audio", help="Original audio file")
     parser.add_argument("new_audio", help="New (replacement) audio file")
@@ -1127,10 +1369,6 @@ if __name__ == "__main__":
         help="Old bars file",
     )
     parser.add_argument(
-        "-p", "--old-parts", required=True,
-        help="Old parts file (section boundaries)",
-    )
-    parser.add_argument(
         "-o", "--outdir", default="remapped",
         help="Output directory (default: remapped/)",
     )
@@ -1140,14 +1378,13 @@ if __name__ == "__main__":
         print("Error: provide at least one label file to remap.", file=sys.stderr)
         sys.exit(1)
 
-    main_v6(
+    main_v7(
         args.old_audio,
         args.new_audio,
         args.new_beats,
         args.new_bars,
         args.old_beats,
         args.old_bars,
-        args.old_parts,
         args.labels,
         args.outdir,
     )

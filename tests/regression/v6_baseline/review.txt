@@ -1,0 +1,5 @@
+118.240000	118.240000	[break] bars 107-108 empty (section has 2 extra bars)
+118.240000	118.240000	[break] bars 98-108 empty (section has 11 extra bars)
+119.897506	119.897506	old section missing from new, was here (bar 98 - bar 99 beat 2)
+192.000000	192.000000	new has extra section bar 157 beat 2 - bar 160
+192.880000	192.880000	[hit] bars 160-161 empty (section has 2 extra bars)

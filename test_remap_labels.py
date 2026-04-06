@@ -44,7 +44,7 @@ SONG_DIR = (
     "/Users/bwagner/projects/cover-notes-gitlab/batch01"
     "/blues_brothers_everybody_needs_somebody"
 )
-REMAPPED_DIR = "/Users/bwagner/projects/remap_labels/remapped"
+V6_BASELINE_DIR = "/Users/bwagner/projects/remap_labels/tests/regression/v6_baseline"
 
 
 # -- Tests for parse_section_entries --
@@ -411,8 +411,142 @@ class TestReviewMarks:
         assert any("empty" in w.lower() for w in warnings)
 
 
+class TestParseToAbsoluteBarBeat:
+    """v7: parse labels to absolute (bar, beat) without sections."""
+
+    def test_simple_chords(self):
+        from remap_labels import parse_labels_to_bar_beat
+
+        entries = parse_labels_to_bar_beat(CHORDS_SIMPLE, BEAT_GRID, BAR_GRID)
+        assert len(entries) == 4
+        # C at bar 0 beat 0
+        assert entries[0].bar_offset == Fraction(0)
+        assert entries[0].label == "C"
+        # F at bar 0 beat 2 = bar 1/2
+        assert entries[1].bar_offset == Fraction(1, 2)
+        # Bb at bar 1 beat 0
+        assert entries[2].bar_offset == Fraction(1)
+        # F at bar 1 beat 2 = bar 3/2
+        assert entries[3].bar_offset == Fraction(3, 2)
+
+    def test_bridge_chords(self):
+        from remap_labels import parse_labels_to_bar_beat
+
+        entries = parse_labels_to_bar_beat(CHORDS_BRIDGE, BEAT_GRID, BAR_GRID)
+        assert len(entries) == 2
+        # Am at bar 2
+        assert entries[0].bar_offset == Fraction(2)
+        assert entries[0].bar_count == Fraction(1)
+        # F at bar 3
+        assert entries[1].bar_offset == Fraction(3)
+
+    def test_point_labels(self):
+        from remap_labels import parse_labels_to_bar_beat
+
+        entries = parse_labels_to_bar_beat(CHORDS_WITH_POINTS, BEAT_GRID, BAR_GRID)
+        assert len(entries) == 3
+        assert entries[1].is_point
+        # Point at 3.5 = bar 1, beat 1 = bar 5/4
+        assert entries[1].bar_offset == Fraction(5, 4)
+
+
+class TestReconstructAbsolute:
+    """v7: reconstruct from absolute positions without sections."""
+
+    def test_simple_reconstruction(self):
+        from remap_labels import parse_labels_to_bar_beat, reconstruct_labels
+
+        entries = parse_labels_to_bar_beat(CHORDS_SIMPLE, BEAT_GRID, BAR_GRID)
+        # Reconstruct on a grid with different spacing
+        new_beats = [2.0 + i * 0.6 for i in range(32)]
+        new_bars = [new_beats[i] for i in range(0, 32, 4)]
+        labels, warnings = reconstruct_labels(
+            entries, new_beats, new_bars, BEATS_PER_BAR,
+        )
+        assert len(labels) == 4
+        assert labels[0] == LabelEntry(2.0, 3.2, "C")
+        assert labels[1] == LabelEntry(3.2, 4.4, "F")
+
+    def test_chained_output(self):
+        from remap_labels import parse_labels_to_bar_beat, reconstruct_labels
+
+        all_chords = CHORDS_SIMPLE + CHORDS_BRIDGE
+        entries = parse_labels_to_bar_beat(all_chords, BEAT_GRID, BAR_GRID)
+        labels, _ = reconstruct_labels(entries, BEAT_GRID, BAR_GRID, BEATS_PER_BAR)
+        # Range labels should chain
+        for i in range(len(labels) - 1):
+            if not labels[i].is_point and not labels[i + 1].is_point:
+                assert labels[i].end == labels[i + 1].start
+
+    def test_dropped_label_beyond_grid(self):
+        from remap_labels import reconstruct_labels
+
+        entries = [
+            SectionEntry(Fraction(10), "C", False, Fraction(1, 2)),  # bar 10
+        ]
+        # Grid with only 4 bars
+        short_beats = [i * 0.5 for i in range(16)]
+        short_bars = [i * 2.0 for i in range(4)]
+        labels, warnings = reconstruct_labels(
+            entries, short_beats, short_bars, BEATS_PER_BAR,
+        )
+        assert len(labels) == 0
+        assert any("dropped" in w.lower() for w in warnings)
+
+
+class TestV7OutputMatchesV6:
+    """Removing section-based logic must not change the label output."""
+
+    def _load_all_labels(self, directory):
+        """Load all label files from a directory, return dict of filename -> content."""
+        from pathlib import Path
+        result = {}
+        for f in sorted(Path(directory).glob("*.txt")):
+            if f.name == "review.txt":
+                continue  # review wording will change
+            result[f.name] = f.read_text()
+        return result
+
+    def test_label_output_unchanged(self):
+        """Label files (chords, parts, guit) from v7 must match v6."""
+        import os
+        v6_dir = V6_BASELINE_DIR
+        v7_dir = "/Users/bwagner/projects/remap_labels/remapped_v7"
+        if not os.path.exists(f"{v6_dir}/chords_blues_brothers_everybody_needs_somebody.txt"):
+            pytest.skip("Run v6 remap_labels on real data first")
+        if not os.path.exists(v7_dir):
+            pytest.skip("Run v7 remap_labels on real data first")
+
+        v6_labels = self._load_all_labels(v6_dir)
+        v7_labels = self._load_all_labels(v7_dir)
+
+        assert set(v6_labels.keys()) == set(v7_labels.keys()), (
+            f"Different files: v6={set(v6_labels.keys())}, v7={set(v7_labels.keys())}"
+        )
+        for name in v6_labels:
+            assert v6_labels[name] == v7_labels[name], (
+                f"{name} differs between v6 and v7"
+            )
+
+    def test_review_has_no_false_section_warnings(self):
+        """v7 review track should not contain section-boundary artifacts
+        like 'empty bars' from v6's section machinery."""
+        import os
+        from pathlib import Path
+
+        v7_dir = "/Users/bwagner/projects/remap_labels/remapped_v7"
+        review_path = f"{v7_dir}/review.txt"
+        if not os.path.exists(review_path):
+            pytest.skip("Run v7 remap_labels on real data first")
+
+        content = Path(review_path).read_text()
+        assert "empty" not in content.lower(), (
+            "v7 should not have section-boundary 'empty bars' warnings"
+        )
+
+
 REAL_DATA_AVAILABLE = (
-    os.path.exists(f"{REMAPPED_DIR}/chords_blues_brothers_everybody_needs_somebody.txt")
+    os.path.exists(f"{V6_BASELINE_DIR}/chords_blues_brothers_everybody_needs_somebody.txt")
     and os.path.exists(f"{SONG_DIR}/new_bars.txt")
     and os.path.exists(f"{SONG_DIR}/new_beats.txt")
 )
@@ -423,7 +557,7 @@ class TestRealSongOutput:
 
     def test_all_chord_boundaries_on_beats(self):
         chords = _load_chords(
-            f"{REMAPPED_DIR}/chords_blues_brothers_everybody_needs_somebody.txt"
+            f"{V6_BASELINE_DIR}/chords_blues_brothers_everybody_needs_somebody.txt"
         )
         beats = _load_grid(f"{SONG_DIR}/new_beats.txt")
 
@@ -442,7 +576,7 @@ class TestRealSongOutput:
     def test_bars_31_32_not_empty(self):
         """Bars 31-32 must contain chords."""
         chords = _load_chords(
-            f"{REMAPPED_DIR}/chords_blues_brothers_everybody_needs_somebody.txt"
+            f"{V6_BASELINE_DIR}/chords_blues_brothers_everybody_needs_somebody.txt"
         )
         bars = _load_grid(f"{SONG_DIR}/new_bars.txt")
 
@@ -460,7 +594,7 @@ class TestRealSongOutput:
     def test_structural_change_at_bar_98_flagged(self):
         """The removed section around bar 98 must be flagged in the review track."""
         import os
-        review_path = f"{REMAPPED_DIR}/review.txt"
+        review_path = f"{V6_BASELINE_DIR}/review.txt"
         if not os.path.exists(review_path):
             pytest.skip("Run remap_labels on real data first")
 
@@ -480,7 +614,7 @@ class TestRealSongOutput:
         """The held C chord in 'hiiit' crosses bar boundaries (structural
         change). This must be flagged in the review track."""
         import os
-        review_path = f"{REMAPPED_DIR}/review.txt"
+        review_path = f"{V6_BASELINE_DIR}/review.txt"
         if not os.path.exists(review_path):
             pytest.skip("Run remap_labels on real data first")
 
