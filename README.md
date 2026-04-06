@@ -131,10 +131,63 @@ remap_labels.py \
 # Step 3: import remapped/*.txt into Audacity with the new audio
 ```
 
+## label_info - inspect label tracks
+
+Display label tracks with bar/beat positions instead of timestamps. Detects repeating chord patterns and interleaves multiple tracks.
+
+```bash
+# Auto-discover all label/grid files from mp3 or aup3:
+label_info.py song.mp3
+
+# Separate per-track view:
+label_info.py song.mp3 -s
+
+# Show track prefixes:
+label_info.py song.mp3 -p
+
+# Spell out every label (no pattern collapsing):
+label_info.py song.mp3 -e
+
+# Explicit files:
+label_info.py -l chords.txt parts.txt --bars bars.txt --beats beats.txt
+```
+
+### Example output
+
+```
+  bars 1-8: | C, F | Bb, F | x4  [intro_instr]
+  bars 9-30: | C, F | Bb, F | x11  [intro_speech]
+  bars 31-56: | C, F | Bb, F | x13  [verse1]
+  bar 57: Am bridge1
+  bar 59: F
+  bar 61: Am
+  bar 63: G
+  bars 65-80: | C | F | x8  [verse2_instr]
+```
+
+Bars with labels from multiple tracks are merged. Repeating chord patterns are collapsed with `xN` notation. Section names from the parts track appear in `[brackets]`.
+
+### Pattern detection
+
+The algorithm scans left to right, greedily matching the smallest repeating unit at each position. For each position, it tries pattern lengths 1, 2, 3, ... and takes the first that repeats 2+ times consecutively. Unmatched bars are emitted as literals. This is O(n^2) worst case but fast enough for typical song lengths (< 200 bars).
+
+In interleaved mode, patterns are detected on the primary track (the one with the most labels, typically chords). Labels from other tracks (e.g. section names from parts) split the repeat range and appear as `[annotations]` rather than breaking the pattern.
+
+| Arg | Description |
+|-----|-------------|
+| `source` | Audio file (.mp3/.aup3) for auto-discovery |
+| `-l` / `--labels` | Label files (overrides auto-discovery) |
+| `--bars` | Bars grid file (overrides auto-discovery) |
+| `--beats` | Beats grid file (overrides auto-discovery) |
+| `-s` / `--separate` | Show each track separately |
+| `-p` / `--show-prefix` | Show track prefix on each label |
+| `-e` / `--expand` | Spell out every label |
+| `--show-beats` | Always show beat number |
+
 ## Running tests
 
 ```bash
-uv run --with pytest pytest test_remap_labels.py -v
+uv run --with pytest pytest -v
 ```
 
-Some tests require the real song data to be present and a prior run of `remap_labels.py` to have generated output in `remapped/`. These are skipped automatically if the data isn't available.
+All tests are self-contained and run without external data.

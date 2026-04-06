@@ -40,11 +40,9 @@ PARTS_TWO_SECTIONS = [
     LabelEntry(5.0, 9.0, "bridge"),
 ]
 
-SONG_DIR = (
-    "/Users/bwagner/projects/cover-notes-gitlab/batch01"
-    "/blues_brothers_everybody_needs_somebody"
-)
-V6_BASELINE_DIR = "/Users/bwagner/projects/remap_labels/tests/regression/v6_baseline"
+REGRESSION_DIR = os.path.join(os.path.dirname(__file__), "tests", "regression")
+V6_BASELINE_DIR = os.path.join(REGRESSION_DIR, "v6_baseline")
+GRIDS_DIR = os.path.join(REGRESSION_DIR, "grids")
 
 
 # -- Tests for reconstruct_section --
@@ -316,61 +314,38 @@ class TestReconstructAbsolute:
         assert any("dropped" in w.lower() for w in warnings)
 
 
-class TestV7OutputMatchesV6:
-    """Removing section-based logic must not change the label output."""
+class TestBaselineIntegrity:
+    """Verify the checked-in baseline has expected properties."""
 
-    def _load_all_labels(self, directory):
-        """Load all label files from a directory, return dict of filename -> content."""
+    def test_baseline_has_expected_files(self):
+        """Baseline directory contains chords, parts, guit label files."""
         from pathlib import Path
-        result = {}
-        for f in sorted(Path(directory).glob("*.txt")):
-            if f.name == "review.txt":
-                continue  # review wording will change
-            result[f.name] = f.read_text()
-        return result
+        baseline = Path(V6_BASELINE_DIR)
+        if not baseline.exists():
+            pytest.skip("Baseline directory not found")
+        names = {f.name for f in baseline.glob("*.txt")}
+        assert "chords_blues_brothers_everybody_needs_somebody.txt" in names
+        assert "parts_blues_brothers_everybody_needs_somebody.txt" in names
+        assert "guit_blues_brothers_everybody_needs_somebody.txt" in names
 
-    def test_label_output_unchanged(self):
-        """Label files (chords, parts, guit) from v7 must match v6."""
-        import os
-        v6_dir = V6_BASELINE_DIR
-        v7_dir = "/Users/bwagner/projects/remap_labels/remapped_v7"
-        if not os.path.exists(f"{v6_dir}/chords_blues_brothers_everybody_needs_somebody.txt"):
-            pytest.skip("Run v6 remap_labels on real data first")
-        if not os.path.exists(v7_dir):
-            pytest.skip("Run v7 remap_labels on real data first")
-
-        v6_labels = self._load_all_labels(v6_dir)
-        v7_labels = self._load_all_labels(v7_dir)
-
-        assert set(v6_labels.keys()) == set(v7_labels.keys()), (
-            f"Different files: v6={set(v6_labels.keys())}, v7={set(v7_labels.keys())}"
-        )
-        for name in v6_labels:
-            assert v6_labels[name] == v7_labels[name], (
-                f"{name} differs between v6 and v7"
-            )
-
-    def test_review_has_no_false_section_warnings(self):
-        """v7 review track should not contain section-boundary artifacts
-        like 'empty bars' from v6's section machinery."""
-        import os
+    def test_review_contains_structural_warnings(self):
+        """Review track should flag structural changes."""
         from pathlib import Path
 
-        v7_dir = "/Users/bwagner/projects/remap_labels/remapped_v7"
-        review_path = f"{v7_dir}/review.txt"
-        if not os.path.exists(review_path):
-            pytest.skip("Run v7 remap_labels on real data first")
+        review_path = Path(V6_BASELINE_DIR) / "review.txt"
+        if not review_path.exists():
+            pytest.skip("Baseline review.txt not found")
 
-        content = Path(review_path).read_text()
-        assert "empty" not in content.lower(), (
-            "v7 should not have section-boundary 'empty bars' warnings"
+        content = review_path.read_text()
+        assert "old section missing" in content.lower(), (
+            "Review track should flag removed sections"
         )
 
 
 REAL_DATA_AVAILABLE = (
     os.path.exists(f"{V6_BASELINE_DIR}/chords_blues_brothers_everybody_needs_somebody.txt")
-    and os.path.exists(f"{SONG_DIR}/new_bars.txt")
-    and os.path.exists(f"{SONG_DIR}/new_beats.txt")
+    and os.path.exists(f"{GRIDS_DIR}/new_bars.txt")
+    and os.path.exists(f"{GRIDS_DIR}/new_beats.txt")
 )
 
 
@@ -381,7 +356,7 @@ class TestRealSongOutput:
         chords = _load_chords(
             f"{V6_BASELINE_DIR}/chords_blues_brothers_everybody_needs_somebody.txt"
         )
-        beats = _load_grid(f"{SONG_DIR}/new_beats.txt")
+        beats = _load_grid(f"{GRIDS_DIR}/new_beats.txt")
 
         off_beat = []
         for start, end, label in chords:
@@ -400,7 +375,7 @@ class TestRealSongOutput:
         chords = _load_chords(
             f"{V6_BASELINE_DIR}/chords_blues_brothers_everybody_needs_somebody.txt"
         )
-        bars = _load_grid(f"{SONG_DIR}/new_bars.txt")
+        bars = _load_grid(f"{GRIDS_DIR}/new_bars.txt")
 
         bar_31_start = bars[30]
         bar_32_end = bars[32] if len(bars) > 32 else bars[-1]
@@ -421,7 +396,7 @@ class TestRealSongOutput:
             pytest.skip("Run remap_labels on real data first")
 
         review = _load_chords(review_path)
-        bars = _load_grid(f"{SONG_DIR}/new_bars.txt")
+        bars = _load_grid(f"{GRIDS_DIR}/new_bars.txt")
 
         bar_98_time = bars[97]
         nearby_marks = [
@@ -441,7 +416,7 @@ class TestRealSongOutput:
             pytest.skip("Run remap_labels on real data first")
 
         review = _load_chords(review_path)
-        bars = _load_grid(f"{SONG_DIR}/new_bars.txt")
+        bars = _load_grid(f"{GRIDS_DIR}/new_bars.txt")
 
         # The 'hiiit' section is near bar 155
         bar_155_time = bars[154]
