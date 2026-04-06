@@ -500,3 +500,121 @@ def test_interleave_compact_primary_is_densest(capsys):
     name, labels = _primary_track(tracks)
     assert name == "chords"
     assert len(labels) == 2
+
+
+def test_primary_track_override():
+    """--primary overrides the default densest-track selection."""
+    from label_info import _primary_track
+
+    tracks = {
+        "guit": [
+            LabelEntry(1.0, 2.0, "A"),
+            LabelEntry(2.0, 3.0, "B"),
+            LabelEntry(3.0, 4.0, "C"),
+        ],
+        "chords": [
+            LabelEntry(1.0, 3.0, "C"),
+            LabelEntry(3.0, 5.0, "F"),
+        ],
+        "parts": [LabelEntry(1.0, 5.0, "verse")],
+    }
+    # Default: guit wins (3 labels)
+    name, _ = _primary_track(tracks)
+    assert name == "guit"
+
+    # Override: chords as primary
+    name, labels = _primary_track(tracks, primary="chords")
+    assert name == "chords"
+    assert len(labels) == 2
+
+
+def test_primary_track_override_invalid():
+    """--primary with unknown track name raises."""
+    from label_info import _primary_track
+
+    tracks = {
+        "chords": [LabelEntry(1.0, 3.0, "C")],
+    }
+    with pytest.raises(ValueError, match="nosuch"):
+        _primary_track(tracks, primary="nosuch")
+
+
+def test_interleave_compact_with_primary_override(capsys):
+    """Pattern detection uses the overridden primary track."""
+    from label_info import _print_interleave_compact
+
+    # guit has more labels but irregular pattern
+    # chords has a clean 2-bar repeat
+    tracks = {
+        "chords": [
+            LabelEntry(1.0, 3.0, "C"),
+            LabelEntry(3.0, 5.0, "F"),
+            LabelEntry(5.0, 7.0, "C"),
+            LabelEntry(7.0, 9.0, "F"),
+        ],
+        "guit": [
+            LabelEntry(1.0, 2.0, "riff1"),
+            LabelEntry(3.0, 4.0, "riff2"),
+            LabelEntry(5.0, 6.0, "riff3"),
+            LabelEntry(7.0, 8.0, "riff4"),
+            LabelEntry(8.0, 9.0, "riff5"),
+        ],
+    }
+    _print_interleave_compact(
+        tracks, BAR_GRID_LARGE, BEAT_GRID_LARGE,
+        primary="chords",
+    )
+    output = capsys.readouterr().out
+    lines = [ln.strip() for ln in output.strip().splitlines()]
+    # Should find C|F x2 pattern from chords, not guit's irregular pattern
+    assert any("| C | F | x2" in ln for ln in lines)
+
+
+def test_interleave_compact_omits_dense_track(capsys):
+    """Dense non-primary tracks are omitted with a notice."""
+    from label_info import _print_interleave_compact
+
+    tracks = {
+        "chords": [
+            LabelEntry(1.0, 3.0, "C"),
+            LabelEntry(3.0, 5.0, "F"),
+            LabelEntry(5.0, 7.0, "C"),
+            LabelEntry(7.0, 9.0, "F"),
+        ],
+        "guit": [
+            LabelEntry(1.0, 2.0, "r1"),
+            LabelEntry(2.0, 3.0, "r2"),
+            LabelEntry(3.0, 4.0, "r3"),
+            LabelEntry(5.0, 6.0, "r4"),
+            LabelEntry(7.0, 8.0, "r5"),
+        ],
+    }
+    _print_interleave_compact(
+        tracks, BAR_GRID_LARGE, BEAT_GRID_LARGE,
+        primary="chords",
+    )
+    output = capsys.readouterr().out
+    assert "guit omitted from compact view" in output
+
+
+def test_interleave_compact_no_omission_notice(capsys):
+    """Sparse non-primary tracks are not omitted, no notice shown."""
+    from label_info import _print_interleave_compact
+
+    tracks = {
+        "chords": [
+            LabelEntry(1.0, 3.0, "C"),
+            LabelEntry(3.0, 5.0, "F"),
+            LabelEntry(5.0, 7.0, "C"),
+            LabelEntry(7.0, 9.0, "F"),
+        ],
+        "parts": [
+            LabelEntry(1.0, 9.0, "verse"),
+        ],
+    }
+    _print_interleave_compact(
+        tracks, BAR_GRID_LARGE, BEAT_GRID_LARGE,
+        primary="chords",
+    )
+    output = capsys.readouterr().out
+    assert "omitted" not in output

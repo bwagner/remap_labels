@@ -264,8 +264,21 @@ def detect_pattern(
     return segments
 
 
-def _primary_track(tracks: dict[str, list[LabelEntry]]) -> tuple[str, list[LabelEntry]]:
-    """Return the track with the most labels (the primary/chord track)."""
+def _primary_track(
+    tracks: dict[str, list[LabelEntry]],
+    primary: str | None = None,
+) -> tuple[str, list[LabelEntry]]:
+    """Return the primary track for pattern detection.
+
+    If primary is given, use that track name. Otherwise pick the track
+    with the most labels.
+    """
+    if primary is not None:
+        if primary not in tracks:
+            raise ValueError(
+                f"'{primary}' not found in tracks: {list(tracks.keys())}"
+            )
+        return primary, tracks[primary]
     return max(tracks.items(), key=lambda kv: len(kv[1]))
 
 
@@ -276,13 +289,14 @@ def _print_interleave_compact(
     *,
     show_beats: bool = False,
     show_prefix: bool = False,
+    primary: str | None = None,
 ) -> None:
     """Print interleaved tracks compactly.
 
     Detects patterns on the primary track, then overlays other tracks'
     labels. Bars with extra labels are spelled out as literals.
     """
-    primary_name, primary_labels = _primary_track(tracks)
+    primary_name, primary_labels = _primary_track(tracks, primary=primary)
     segments = detect_pattern(primary_labels, bar_grid, beat_grid)
 
     # Build interleaved lines indexed by bar number
@@ -295,10 +309,17 @@ def _print_interleave_compact(
         bar_num = int(line.split(":")[0].replace("bar ", "").split(".")[0])
         bar_to_lines.setdefault(bar_num, []).append(line)
 
-    # Collect bars that have labels from non-primary tracks
+    # Collect bars that have labels from sparse non-primary tracks
+    # (tracks with fewer labels than primary don't repeat every bar,
+    # so their labels mark structural boundaries worth splitting at)
+    primary_count = len(primary_labels)
     other_labels = {}
+    omitted_tracks = []
     for name, labels in tracks.items():
         if name == primary_name:
+            continue
+        if len(labels) >= primary_count:
+            omitted_tracks.append(name)
             continue
         for lbl in labels:
             bar_idx = _find_bar_for_time(lbl.start, bar_grid)
@@ -375,6 +396,10 @@ def _print_interleave_compact(
                     for line in bar_to_lines.get(bar_num, []):
                         print(f"  {line}")
                     pos += 1
+
+    if omitted_tracks:
+        names = ", ".join(omitted_tracks)
+        print(f"\n  ({names} omitted from compact view, use -s to see separately)")
 
 
 def _format_pattern(bar_tuples: list[tuple[str, ...]], count: int, bars: int) -> str:
@@ -468,12 +493,16 @@ def main() -> None:
         help="Always show beat number, even on bar boundaries",
     )
     parser.add_argument(
-        "-p", "--show-prefix", action="store_true",
+        "-x", "--show-prefix", action="store_true",
         help="Show track prefix on each label",
     )
     parser.add_argument(
         "-e", "--expand", action="store_true",
         help="Spell out every label instead of collapsing repeating patterns",
+    )
+    parser.add_argument(
+        "-p", "--primary",
+        help="Track to use for pattern detection (default: most labels)",
     )
     args = parser.parse_args()
 
@@ -526,6 +555,7 @@ def main() -> None:
             _print_interleave_compact(
                 tracks, bar_grid, beat_grid,
                 show_beats=args.show_beats, show_prefix=args.show_prefix,
+                primary=args.primary,
             )
 
 
