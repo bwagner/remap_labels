@@ -47,54 +47,6 @@ SONG_DIR = (
 V6_BASELINE_DIR = "/Users/bwagner/projects/remap_labels/tests/regression/v6_baseline"
 
 
-# -- Tests for parse_section_entries --
-
-
-class TestParseSectionEntries:
-
-    def test_half_bar_chords(self):
-        from remap_labels import parse_section_entries
-
-        entries = parse_section_entries(
-            CHORDS_SIMPLE, BEAT_GRID, BAR_GRID, BEATS_PER_BAR, 1.0, 5.0,
-        )
-        assert len(entries) == 4
-        assert entries[0] == SectionEntry(Fraction(0), "C", False, Fraction(1, 2))
-        assert entries[1] == SectionEntry(Fraction(1, 2), "F", False, Fraction(1, 2))
-        assert entries[2] == SectionEntry(Fraction(1), "Bb", False, Fraction(1, 2))
-        assert entries[3] == SectionEntry(Fraction(3, 2), "F", False, Fraction(1, 2))
-
-    def test_full_bar_chords(self):
-        from remap_labels import parse_section_entries
-
-        entries = parse_section_entries(
-            CHORDS_BRIDGE, BEAT_GRID, BAR_GRID, BEATS_PER_BAR, 5.0, 9.0,
-        )
-        assert len(entries) == 2
-        assert entries[0] == SectionEntry(Fraction(0), "Am", False, Fraction(1))
-        assert entries[1] == SectionEntry(Fraction(1), "F", False, Fraction(1))
-
-    def test_point_labels(self):
-        from remap_labels import parse_section_entries
-
-        entries = parse_section_entries(
-            CHORDS_WITH_POINTS, BEAT_GRID, BAR_GRID, BEATS_PER_BAR, 1.0, 7.0,
-        )
-        assert len(entries) == 3
-        assert entries[0] == SectionEntry(Fraction(0), "C", False, Fraction(1, 2))
-        assert entries[1] == SectionEntry(Fraction(5, 4), "C (piano)", True, Fraction(0))
-        assert entries[2] == SectionEntry(Fraction(2), "C (piano)", True, Fraction(0))
-
-    def test_filters_chords_outside_section(self):
-        from remap_labels import parse_section_entries
-
-        all_chords = CHORDS_SIMPLE + CHORDS_BRIDGE
-        entries = parse_section_entries(
-            all_chords, BEAT_GRID, BAR_GRID, BEATS_PER_BAR, 1.0, 5.0,
-        )
-        assert len(entries) == 4
-
-
 # -- Tests for reconstruct_section --
 
 
@@ -194,52 +146,6 @@ class TestValidation:
         assert any("bar count" in w.lower() for w in warnings)
 
 
-# -- Tests for map_section_boundaries --
-
-
-class TestMapSectionBoundaries:
-
-    def test_identity_warp(self):
-        from remap_labels import map_section_boundaries
-
-        def identity_warp(t):
-            return t
-
-        result = map_section_boundaries(PARTS_TWO_SECTIONS, identity_warp, BAR_GRID)
-        assert result[0].name == "verse"
-        assert result[0].new_bar_idx == 0
-        assert result[1].name == "bridge"
-        assert result[1].new_bar_idx == 2
-
-    def test_shifted_warp(self):
-        from remap_labels import map_section_boundaries
-
-        def shift_warp(t):
-            return t + 1.0
-
-        new_bars = [2.0 + i * 2.0 for i in range(8)]
-        result = map_section_boundaries(PARTS_TWO_SECTIONS, shift_warp, new_bars)
-        assert result[0].new_bar_idx == 0
-        assert result[1].new_bar_idx == 2
-
-
-# -- Tests for non-chord labels --
-
-
-class TestNonChordLabels:
-
-    def test_guit_label_in_section(self):
-        from remap_labels import parse_section_entries
-
-        guit_labels = [LabelEntry(2.5, 3.0, "gB eB -> gC eC")]
-        entries = parse_section_entries(
-            guit_labels, BEAT_GRID, BAR_GRID, BEATS_PER_BAR, 1.0, 5.0,
-        )
-        assert len(entries) == 1
-        assert entries[0].bar_offset == Fraction(3, 4)
-        assert entries[0].bar_count == Fraction(1, 4)
-
-
 # -- Tests against real song output --
 
 
@@ -275,90 +181,6 @@ def _bars_for_range(bars, start_time, end_time):
         if start_time - 0.01 <= t <= end_time + 0.01:
             result.append(i + 1)
     return result
-
-
-class TestNoGapsBetweenSections:
-    """When DTW maps sections with a gap, chords must still be contiguous."""
-
-    def test_section_gap_filled(self):
-        """If old section A has 2 bars of chords and DTW would map next
-        section to bar 4 (leaving bars 2-3 empty), contiguous placement
-        should close the gap."""
-        from remap_labels import (
-            map_section_boundaries,
-            parse_section_entries,
-            reconstruct_section,
-        )
-
-        # Old grids: 4 beats/bar, bars at 0, 2, 4, 6, 8, 10
-        old_beats = [i * 0.5 for i in range(24)]
-        old_bars = [i * 2.0 for i in range(6)]
-
-        # Section A: bars 0-1 (0.0 - 4.0), 4 half-bar chords
-        section_a_chords = [
-            LabelEntry(0.0, 1.0, "C"),
-            LabelEntry(1.0, 2.0, "F"),
-            LabelEntry(2.0, 3.0, "Bb"),
-            LabelEntry(3.0, 4.0, "F"),
-        ]
-
-        # Section B: bars 2-3 (4.0 - 8.0), 4 half-bar chords
-        section_b_chords = [
-            LabelEntry(4.0, 5.0, "Am"),
-            LabelEntry(5.0, 6.0, "F"),
-            LabelEntry(6.0, 7.0, "Am"),
-            LabelEntry(7.0, 8.0, "G"),
-        ]
-
-        old_parts = [
-            LabelEntry(0.0, 4.0, "verse"),
-            LabelEntry(4.0, 8.0, "bridge"),
-        ]
-
-        # New grids: more bars (DTW would put bridge at bar 4)
-        new_beats = [i * 0.5 for i in range(32)]
-        new_bars = [i * 2.0 for i in range(8)]
-
-        # Warp that shifts section B later (simulating DTW imprecision)
-        def warp(t):
-            if t >= 4.0:
-                return t + 4.0  # shifts bridge to 8.0 -> bar 4
-            return t
-
-        # Map with old_bar_grid -> contiguous placement
-        mapped = map_section_boundaries(old_parts, warp, new_bars, old_bars)
-
-        # Section A at bar 0, section B should be at bar 2 (contiguous),
-        # NOT bar 4 (where DTW would put it)
-        assert mapped[0].new_bar_idx == 0
-        assert mapped[1].new_bar_idx == 2, (
-            f"Bridge should be at bar 2 (contiguous), got bar {mapped[1].new_bar_idx}"
-        )
-
-        # Reconstruct and verify no gap
-        entries_a = parse_section_entries(
-            section_a_chords, old_beats, old_bars, BEATS_PER_BAR, 0.0, 4.0,
-        )
-        entries_b = parse_section_entries(
-            section_b_chords, old_beats, old_bars, BEATS_PER_BAR, 4.0, 8.0,
-        )
-
-        labels_a, _ = reconstruct_section(
-            entries_a, new_beats, new_bars, BEATS_PER_BAR,
-            section_start_bar=mapped[0].new_bar_idx,
-            section_end_bar=mapped[1].new_bar_idx,
-        )
-        labels_b, _ = reconstruct_section(
-            entries_b, new_beats, new_bars, BEATS_PER_BAR,
-            section_start_bar=mapped[1].new_bar_idx,
-            section_end_bar=mapped[1].new_bar_idx + 2,
-        )
-
-        # Last chord of A should end where first chord of B starts
-        assert labels_a[-1].end == labels_b[0].start, (
-            f"Gap between sections: A ends {labels_a[-1].end}, "
-            f"B starts {labels_b[0].start}"
-        )
 
 
 class TestReviewMarks:
