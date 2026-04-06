@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+remapped/
+remapped_v7/
+
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
