@@ -71,6 +71,9 @@ EXPAND_RATIO = 3.0
 MIN_ANOMALY_DURATION_S = 2.0
 # Window size (seconds) for scanning the DTW path for anomalies
 SCAN_WINDOW_S = 4.0
+# Small value added to chroma features to prevent NaN in cosine distance
+# from zero-magnitude frames (silence)
+CHROMA_EPSILON = 1e-10
 
 
 def load_timestamps(path: str) -> list[float]:
@@ -101,6 +104,9 @@ def compute_alignment(old_audio: str, new_audio: str):
     print("Computing chroma features...")
     chroma_old = librosa.feature.chroma_cqt(y=y_old, sr=SAMPLE_RATE, hop_length=HOP_LENGTH)
     chroma_new = librosa.feature.chroma_cqt(y=y_new, sr=SAMPLE_RATE, hop_length=HOP_LENGTH)
+
+    chroma_old = chroma_old + CHROMA_EPSILON
+    chroma_new = chroma_new + CHROMA_EPSILON
 
     print(f"Running DTW ({chroma_old.shape[1]} x {chroma_new.shape[1]} frames)...")
     _D, wp = librosa.sequence.dtw(X=chroma_old, Y=chroma_new, metric="cosine")
