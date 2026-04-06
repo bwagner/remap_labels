@@ -62,10 +62,10 @@ awk '$2==1 {n++; printf "%.6f\t%.6f\t%d\n", $1, $1, n}' new_downbeats.txt > new_
 remap_labels.py \
     old_audio.mp3 \
     new_audio.mp3 \
-    -b new_beats.txt \
-    -B new_bars.txt \
     --old-beats beats_old.txt \
     --old-bars bars_old.txt \
+    -b new_beats.txt \
+    -B new_bars.txt \
     chords_old.txt parts_old.txt guit_old.txt rehearse_old.txt
 ```
 
@@ -79,10 +79,10 @@ All label files listed at the end are remapped. Output goes to `remapped/` (over
 |-----|-------------|
 | `old_audio` | Original audio file |
 | `new_audio` | New (replacement) audio file |
-| `-b` / `--new-beats` | New beat grid (from DBNDownBeatTracker) |
-| `-B` / `--new-bars` | New bar grid (downbeats from DBNDownBeatTracker) |
 | `--old-beats` | Old beat grid |
 | `--old-bars` | Old bar grid |
+| `-b` / `--new-beats` | New beat grid (from DBNDownBeatTracker) |
+| `-B` / `--new-bars` | New bar grid (downbeats from DBNDownBeatTracker) |
 | `-o` / `--outdir` | Output directory (default: `remapped/`) |
 | label files... | Any number of label files to remap |
 
@@ -120,10 +120,10 @@ awk '$2==1 {n++; printf "%.6f\t%.6f\t%d\n", $1, $1, n}' new_downbeats.txt > new_
 remap_labels.py \
     blues_brothers_everybody_needs_somebody.mp3 \
     21_Everybody_needs_somebody_Playback_band.mp3 \
-    -b new_beats.txt \
-    -B new_bars.txt \
     --old-beats beats_blues_brothers_everybody_needs_somebody.txt \
     --old-bars bars_blues_brothers_everybody_needs_somebody.txt \
+    -b new_beats.txt \
+    -B new_bars.txt \
     chords_blues_brothers_everybody_needs_somebody.txt \
     parts_blues_brothers_everybody_needs_somebody.txt \
     guit_blues_brothers_everybody_needs_somebody.txt

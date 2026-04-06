@@ -647,20 +647,20 @@ if __name__ == "__main__":
         "labels", nargs="*", help="Label .txt files to remap"
     )
     parser.add_argument(
-        "-b", "--new-beats", required=True,
-        help="New beats file",
-    )
-    parser.add_argument(
-        "-B", "--new-bars", required=True,
-        help="New bars file",
-    )
-    parser.add_argument(
         "--old-beats", required=True,
         help="Old beats file",
     )
     parser.add_argument(
         "--old-bars", required=True,
         help="Old bars file",
+    )
+    parser.add_argument(
+        "-b", "--new-beats", required=True,
+        help="New beats file",
+    )
+    parser.add_argument(
+        "-B", "--new-bars", required=True,
+        help="New bars file",
     )
     parser.add_argument(
         "-o", "--outdir", default="remapped",
