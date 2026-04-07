@@ -270,6 +270,86 @@ class TestParseToAbsoluteBarBeat:
         assert entries[1].bar_offset == Fraction(5, 4)
 
 
+    def test_sub_beat_labels_get_distinct_offsets(self):
+        """Labels between beats must not collapse to the same bar_offset.
+
+        Turnaround scenario: F7, Bb7, B7 all within one beat span.
+        Each must get a distinct bar_offset so they reconstruct at
+        different times.
+        """
+        from remap_labels import parse_labels_to_bar_beat
+
+        # Bar 1 has beats at 1.0, 1.5, 2.0, 2.5
+        # Place 3 chords between beat 1 (1.0) and beat 2 (1.5):
+        #   F7 at 1.0 (on beat 1)
+        #   Bb7 at 1.16 (between beat 1 and 2)
+        #   B7 at 1.32 (between beat 1 and 2, closer to beat 2)
+        turnaround = [
+            LabelEntry(1.0, 1.16, "F7"),
+            LabelEntry(1.16, 1.32, "Bb7"),
+            LabelEntry(1.32, 1.5, "B7"),
+        ]
+        entries = parse_labels_to_bar_beat(turnaround, BEAT_GRID, BAR_GRID)
+
+        offsets = [e.bar_offset for e in entries]
+        assert len(set(offsets)) == 3, (
+            f"Sub-beat labels collapsed to same offset: {offsets}"
+        )
+
+    def test_sub_beat_round_trip(self):
+        """Sub-beat labels must reconstruct at distinct, ordered times."""
+        from remap_labels import parse_labels_to_bar_beat, reconstruct_labels
+
+        turnaround = [
+            LabelEntry(1.0, 1.16, "F7"),
+            LabelEntry(1.16, 1.32, "Bb7"),
+            LabelEntry(1.32, 1.5, "B7"),
+        ]
+        entries = parse_labels_to_bar_beat(turnaround, BEAT_GRID, BAR_GRID)
+        labels, _ = reconstruct_labels(
+            entries, BEAT_GRID, BAR_GRID, BEATS_PER_BAR,
+        )
+
+        assert len(labels) == 3
+        # All must have distinct start times, in order
+        starts = [lbl.start for lbl in labels]
+        assert starts[0] < starts[1] < starts[2], (
+            f"Sub-beat labels not in order: {starts}"
+        )
+
+
+    def test_non_overlapping_input_produces_non_overlapping_output(self):
+        """If input labels don't overlap, output labels must not overlap either.
+
+        Sub-beat labels (like turnarounds) must not produce overlapping
+        times after reconstruction.
+        """
+        from remap_labels import parse_labels_to_bar_beat, reconstruct_labels
+
+        # Turnaround: 4 chords packed within one beat, non-overlapping
+        turnaround = [
+            LabelEntry(1.0, 1.16, "F7"),
+            LabelEntry(1.16, 1.32, "Bb7"),
+            LabelEntry(1.32, 1.5, "B7"),
+            LabelEntry(1.5, 3.0, "C7"),
+        ]
+        # Verify input doesn't overlap
+        for i in range(len(turnaround) - 1):
+            assert turnaround[i].end <= turnaround[i + 1].start + 0.001
+
+        entries = parse_labels_to_bar_beat(turnaround, BEAT_GRID, BAR_GRID)
+        labels, _ = reconstruct_labels(
+            entries, BEAT_GRID, BAR_GRID, BEATS_PER_BAR,
+        )
+
+        assert len(labels) == 4
+        for i in range(len(labels) - 1):
+            assert labels[i].end <= labels[i + 1].start + 0.001, (
+                f"Overlap: '{labels[i].label}' ends at {labels[i].end:.6f} "
+                f"but '{labels[i+1].label}' starts at {labels[i+1].start:.6f}"
+            )
+
+
 class TestReconstructAbsolute:
     """v7: reconstruct from absolute positions without sections."""
 
