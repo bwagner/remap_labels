@@ -109,7 +109,7 @@ def compute_alignment(old_audio: str, new_audio: str):
     chroma_new = chroma_new + CHROMA_EPSILON
 
     print(f"Running DTW ({chroma_old.shape[1]} x {chroma_new.shape[1]} frames)...")
-    _D, wp = librosa.sequence.dtw(X=chroma_old, Y=chroma_new, metric="cosine")
+    _D, wp = librosa.sequence.dtw(X=chroma_old, Y=chroma_new, metric="cosine", subseq=True)
     wp = wp[::-1]  # sort ascending
 
     old_frames = wp[:, 0]
@@ -227,6 +227,45 @@ GRID_MATCH_TOLERANCE = 0.05
 BAR_SHIFT_SAMPLE_SIZE = 20
 
 
+CONFIDENT_VOTE_RATIO = 2.0
+
+
+def choose_bar_shift(
+    shifts: list[int],
+) -> tuple[int, list[dict]]:
+    """Choose bar shift from per-bar shift votes.
+
+    Returns (best_shift, candidates) where each candidate is a dict
+    with keys: shift, votes, bars (1-indexed), confident.
+
+    Confident if the top candidate has >= CONFIDENT_VOTE_RATIO times
+    the votes of the second candidate, or is the only candidate.
+    """
+    from collections import Counter
+
+    counts = Counter(shifts)
+    ranked = counts.most_common()
+
+    candidates = []
+    for shift, vote_count in ranked:
+        bars = [i + 1 for i, s in enumerate(shifts) if s == shift]
+        candidates.append({
+            "shift": shift,
+            "votes": vote_count,
+            "bars": bars,
+            "confident": False,  # set below
+        })
+
+    if len(candidates) == 1:
+        candidates[0]["confident"] = True
+    elif len(candidates) >= 2:
+        top_votes = candidates[0]["votes"]
+        second_votes = candidates[1]["votes"]
+        candidates[0]["confident"] = top_votes >= second_votes * CONFIDENT_VOTE_RATIO
+
+    return candidates[0]["shift"], candidates
+
+
 def determine_bar_shift(
     old_bar_grid: list[float],
     new_bar_grid: list[float],
@@ -238,8 +277,6 @@ def determine_bar_shift(
     common shift. This is robust against DTW matching repeated
     intro riffs to the wrong repetition.
     """
-    from collections import Counter
-
     n = min(BAR_SHIFT_SAMPLE_SIZE, len(old_bar_grid))
     shifts = []
     for i in range(n):
@@ -247,7 +284,8 @@ def determine_bar_shift(
         new_idx = grid_index(warped, new_bar_grid)
         shifts.append(new_idx - i)
 
-    return Counter(shifts).most_common(1)[0][0]
+    shift, candidates = choose_bar_shift(shifts)
+    return shift
 
 
 # -- v6: Musical-structure data types and functions --
@@ -368,26 +406,37 @@ def reconstruct_section(
         frac_in_bar = (entry.bar_offset - whole_bars) * beats_per_bar
         abs_bar = section_start_bar + whole_bars
 
-        if abs_bar >= len(bar_grid) or abs_bar >= section_end_bar:
+        if entry.bar_offset < 0:
+            # Pickup/anacrusis: place before bar_grid[section_start_bar]
+            # using beat offset from bar 1
+            bar1_time = bar_grid[section_start_bar]
+            bar1_beats = _beats_in_bar(section_start_bar, beat_grid, bar_grid)
+            if len(bar1_beats) >= 2:
+                beat_dur = beat_grid[bar1_beats[1]] - beat_grid[bar1_beats[0]]
+            else:
+                beat_dur = (bar_grid[1] - bar_grid[0]) / beats_per_bar if len(bar_grid) > 1 else 0.5
+            # bar_offset is negative, so this subtracts from bar 1
+            start_time = bar1_time + float(entry.bar_offset) * beats_per_bar * beat_dur
+        elif abs_bar >= len(bar_grid) or abs_bar >= section_end_bar:
             warnings.append(
                 f"'{entry.label}' at bar {entry.bar_offset} dropped"
             )
             continue
-
-        # Find beat within bar, interpolating for sub-beat positions
-        bar_beats = _beats_in_bar(abs_bar, beat_grid, bar_grid)
-        whole_beat = int(frac_in_bar)
-        sub_beat_frac = float(frac_in_bar - whole_beat)
-
-        if whole_beat < len(bar_beats):
-            beat_time = beat_grid[bar_beats[whole_beat]]
-            if sub_beat_frac > 0 and whole_beat + 1 < len(bar_beats):
-                next_beat_time = beat_grid[bar_beats[whole_beat + 1]]
-                start_time = beat_time + sub_beat_frac * (next_beat_time - beat_time)
-            else:
-                start_time = beat_time
         else:
-            start_time = bar_grid[abs_bar]
+            # Find beat within bar, interpolating for sub-beat positions
+            bar_beats = _beats_in_bar(abs_bar, beat_grid, bar_grid)
+            whole_beat = int(frac_in_bar)
+            sub_beat_frac = float(frac_in_bar - whole_beat)
+
+            if whole_beat < len(bar_beats):
+                beat_time = beat_grid[bar_beats[whole_beat]]
+                if sub_beat_frac > 0 and whole_beat + 1 < len(bar_beats):
+                    next_beat_time = beat_grid[bar_beats[whole_beat + 1]]
+                    start_time = beat_time + sub_beat_frac * (next_beat_time - beat_time)
+                else:
+                    start_time = beat_time
+            else:
+                start_time = bar_grid[abs_bar]
 
         if entry.is_point:
             labels.append(LabelEntry(start_time, start_time, entry.label))
@@ -466,13 +515,47 @@ def parse_labels_to_bar_beat(
     """
     entries = []
     for label in labels:
-        chord_bar = _find_bar_for_time(label.start, bar_grid)
-        frac_beat = _fractional_beat_in_bar(
-            label.start, chord_bar, beat_grid, bar_grid,
-        )
-        bar_beats = _beats_in_bar(chord_bar, beat_grid, bar_grid)
-        beats_per_bar = max(len(bar_beats), 1)
-        bar_offset = Fraction(chord_bar) + frac_beat / beats_per_bar
+        if label.start < bar_grid[0] - GRID_MATCH_TOLERANCE:
+            # Pickup/anacrusis: compute negative bar_offset
+            bar_beats = _beats_in_bar(0, beat_grid, bar_grid)
+            beats_per_bar = max(len(bar_beats), 1)
+            # Find pickup beats (before bar 1)
+            pickup_beats = [i for i, t in enumerate(beat_grid) if t < bar_grid[0] - GRID_MATCH_TOLERANCE]
+            if pickup_beats:
+                # Interpolate within pickup beats
+                beats_before = len(pickup_beats)
+                # Position relative to bar 0: which pickup beat, interpolated
+                for pi, pbi in enumerate(pickup_beats):
+                    if pi + 1 < len(pickup_beats):
+                        if beat_grid[pbi] <= label.start <= beat_grid[pickup_beats[pi + 1]]:
+                            frac = (label.start - beat_grid[pbi]) / (beat_grid[pickup_beats[pi + 1]] - beat_grid[pbi])
+                            beat_pos = -(beats_before - pi) + frac
+                            break
+                    elif abs(beat_grid[pbi] - label.start) < GRID_MATCH_TOLERANCE:
+                        beat_pos = -(beats_before - pi)
+                        break
+                else:
+                    # Before first beat
+                    beat_pos = -beats_before - Fraction(
+                        int((beat_grid[pickup_beats[0]] - label.start) * 1000),
+                        int((beat_grid[1] - beat_grid[0]) * 1000),
+                    )
+                bar_offset = Fraction(beat_pos) / beats_per_bar
+            else:
+                # No pickup beats, estimate from bar spacing
+                bar_dur = bar_grid[1] - bar_grid[0] if len(bar_grid) > 1 else 1.0
+                bar_offset = -Fraction(
+                    int((bar_grid[0] - label.start) * 1000),
+                    int(bar_dur * 1000),
+                )
+        else:
+            chord_bar = _find_bar_for_time(label.start, bar_grid)
+            frac_beat = _fractional_beat_in_bar(
+                label.start, chord_bar, beat_grid, bar_grid,
+            )
+            bar_beats = _beats_in_bar(chord_bar, beat_grid, bar_grid)
+            beats_per_bar = max(len(bar_beats), 1)
+            bar_offset = Fraction(chord_bar) + frac_beat / beats_per_bar
 
         if label.is_point:
             entries.append(SectionEntry(

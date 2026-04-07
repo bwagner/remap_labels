@@ -318,6 +318,48 @@ class TestParseToAbsoluteBarBeat:
         )
 
 
+    def test_pickup_label_before_bar_1(self):
+        """Labels before bar 1 (pickup/anacrusis) get negative bar_offset."""
+        from remap_labels import parse_labels_to_bar_beat
+
+        # Beat grid starts at 0.5 (pickup beat), bar 1 at 1.0
+        # Label at 0.5 is one beat before bar 1
+        beat_grid = [0.5 + i * 0.5 for i in range(32)]
+        bar_grid = [beat_grid[1 + i * 4] for i in range(7)]  # bar 1 at 1.0
+
+        pickup = [
+            LabelEntry(0.5, 1.0, "Dbm7b5"),
+        ]
+        entries = parse_labels_to_bar_beat(pickup, beat_grid, bar_grid)
+
+        assert len(entries) == 1
+        assert entries[0].bar_offset < 0, (
+            f"Pickup label should have negative bar_offset, got {entries[0].bar_offset}"
+        )
+
+    def test_pickup_reconstructs_before_bar_1(self):
+        """Pickup labels reconstruct at times before bar 1."""
+        from remap_labels import parse_labels_to_bar_beat, reconstruct_labels
+
+        beat_grid = [0.5 + i * 0.5 for i in range(32)]
+        bar_grid = [beat_grid[1 + i * 4] for i in range(7)]  # bar 1 at 1.0
+
+        pickup = [
+            LabelEntry(0.5, 1.0, "Dbm7b5"),
+            LabelEntry(1.0, 3.0, "Am"),  # on bar 1
+        ]
+        entries = parse_labels_to_bar_beat(pickup, beat_grid, bar_grid)
+        labels, _ = reconstruct_labels(
+            entries, beat_grid, bar_grid, 4,
+        )
+
+        assert len(labels) == 2
+        assert labels[0].start < bar_grid[0], (
+            f"Pickup should be before bar 1 ({bar_grid[0]}), got {labels[0].start}"
+        )
+        assert labels[0].start < labels[1].start
+        assert labels[0].end <= labels[1].start + 0.001
+
     def test_non_overlapping_input_produces_non_overlapping_output(self):
         """If input labels don't overlap, output labels must not overlap either.
 
@@ -518,6 +560,85 @@ AUDIO_CLIPS_AVAILABLE = os.path.exists(
 )
 
 
+class TestChooseBarShift:
+    """Test the shift selection logic independent of DTW."""
+
+    def test_clear_majority(self):
+        """When one shift dominates, pick it confidently."""
+        from remap_labels import choose_bar_shift
+
+        shift, candidates = choose_bar_shift([2, 2, 2, 2, 2, 2, 2, 1])
+        assert shift == 2
+        assert candidates[0]["shift"] == 2
+        assert candidates[0]["confident"]
+
+    def test_ambiguous_shifts(self):
+        """When top two are close, flag as not confident."""
+        from remap_labels import choose_bar_shift
+
+        shift, candidates = choose_bar_shift([0, -1, 0, 0, -1, -1, -1, -1])
+        assert len(candidates) >= 2
+        assert not candidates[0]["confident"]
+
+    def test_single_shift(self):
+        """All bars agree - maximally confident."""
+        from remap_labels import choose_bar_shift
+
+        shift, candidates = choose_bar_shift([0, 0, 0, 0])
+        assert shift == 0
+        assert candidates[0]["confident"]
+        assert len(candidates) == 1
+
+    def test_three_way_split(self):
+        """Three candidates, none dominant."""
+        from remap_labels import choose_bar_shift
+
+        shift, candidates = choose_bar_shift([0, 1, 2, 0, 1, 2])
+        assert not candidates[0]["confident"]
+        assert len(candidates) >= 3
+
+    def test_clear_majority_with_outliers(self):
+        """Strong majority with a few outliers is still confident."""
+        from remap_labels import choose_bar_shift
+
+        shift, candidates = choose_bar_shift([2, 2, 2, 2, 2, 2, 2, 2, 5, -3])
+        assert shift == 2
+        assert candidates[0]["confident"]
+
+    def test_returns_all_candidates_sorted(self):
+        """Candidates are sorted by vote count descending."""
+        from remap_labels import choose_bar_shift
+
+        shift, candidates = choose_bar_shift([0, 0, 0, -1, -1, 1])
+        votes = [c["votes"] for c in candidates]
+        assert votes == sorted(votes, reverse=True)
+
+    def test_confidence_at_exact_threshold(self):
+        """At exactly 2:1 ratio, still confident."""
+        from remap_labels import choose_bar_shift
+
+        shift, candidates = choose_bar_shift([0, 0, 0, 0, -1, -1])
+        assert shift == 0
+        assert candidates[0]["confident"]
+
+    def test_confidence_just_below_threshold(self):
+        """Just below 2:1 ratio, not confident."""
+        from remap_labels import choose_bar_shift
+
+        shift, candidates = choose_bar_shift([0, 0, 0, -1, -1])
+        assert shift == 0
+        assert not candidates[0]["confident"]
+
+    def test_candidates_include_bars(self):
+        """Each candidate lists which bars voted for it."""
+        from remap_labels import choose_bar_shift
+
+        shift, candidates = choose_bar_shift([2, 1, 2, 2])
+        top = candidates[0]
+        assert top["shift"] == 2
+        assert top["bars"] == [1, 3, 4]  # 1-indexed
+
+
 @pytest.mark.skipif(not AUDIO_CLIPS_AVAILABLE, reason="Audio clips not available")
 class TestBarShiftDetection:
     """Bar shift must use majority vote, not just bar 1."""
@@ -549,4 +670,36 @@ class TestBarShiftDetection:
         assert shift == 2, (
             f"Expected bar shift +2, got +{shift}. "
             "DTW likely matched intro riff to wrong repetition."
+        )
+
+    def test_bar_shift_when_old_longer_than_new(self):
+        """When old audio is much longer than new, subsequence DTW
+        should find the new content within the old.
+
+        Uses SHC clips reversed: 27s new clip as 'old', 11s old clip
+        as 'new', simulating a partial-song scenario like Minnie.
+        """
+        from remap_labels import (
+            compute_alignment,
+            determine_bar_shift,
+            load_timestamps,
+            make_warp_func,
+        )
+
+        # Reversed: long clip as "old", short clip as "new"
+        long_bars = load_timestamps(f"{AUDIO_CLIPS_DIR}/shc_new_bars.txt")
+        short_bars = load_timestamps(f"{AUDIO_CLIPS_DIR}/shc_old_short_bars.txt")
+
+        old_times, new_times = compute_alignment(
+            f"{AUDIO_CLIPS_DIR}/shc_new_intro.mp3",
+            f"{AUDIO_CLIPS_DIR}/shc_old_short.mp3",
+        )
+        warp = make_warp_func(old_times, new_times)
+
+        shift = determine_bar_shift(long_bars, short_bars, warp)
+        # The short clip's content starts at bar 1 of the long clip
+        # (after 2 extra intro bars), so shift should be negative
+        assert shift <= 0, (
+            f"Expected non-positive bar shift, got +{shift}. "
+            "Subsequence DTW should find short clip within long clip."
         )
