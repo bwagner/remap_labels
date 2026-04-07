@@ -223,6 +223,32 @@ def grid_index(t: float, grid: list[float]) -> int:
 # Tolerance for matching a timestamp to a grid point
 GRID_MATCH_TOLERANCE = 0.05
 
+# Number of bars to sample for majority-vote bar shift detection
+BAR_SHIFT_SAMPLE_SIZE = 20
+
+
+def determine_bar_shift(
+    old_bar_grid: list[float],
+    new_bar_grid: list[float],
+    warp,
+) -> int:
+    """Determine bar shift between old and new using majority vote.
+
+    Warps multiple old bar positions through DTW and finds the most
+    common shift. This is robust against DTW matching repeated
+    intro riffs to the wrong repetition.
+    """
+    from collections import Counter
+
+    n = min(BAR_SHIFT_SAMPLE_SIZE, len(old_bar_grid))
+    shifts = []
+    for i in range(n):
+        warped = warp(old_bar_grid[i])
+        new_idx = grid_index(warped, new_bar_grid)
+        shifts.append(new_idx - i)
+
+    return Counter(shifts).most_common(1)[0][0]
+
 
 # -- v6: Musical-structure data types and functions --
 
@@ -524,12 +550,8 @@ def main_v7(
     old_times, new_times = compute_alignment(old_audio, new_audio)
     warp = make_warp_func(old_times, new_times)
 
-    # Find where old bar 0 maps to in new
-    warped_first = warp(old_bar_grid[0])
-    new_first_bar = grid_index(warped_first, new_bar_grid)
-    bar_shift = new_first_bar - 0  # how many bars to shift
-    print(f"\nBar shift: old bar 1 -> new bar {new_first_bar + 1} "
-          f"(shift={bar_shift:+d})")
+    bar_shift = determine_bar_shift(old_bar_grid, new_bar_grid, warp)
+    print(f"\nBar shift: {bar_shift:+d}")
 
     # Detect structural anomalies
     print("\nChecking for structural changes...")

@@ -427,3 +427,46 @@ class TestRealSongOutput:
         assert len(nearby_marks) > 0, (
             "Structural change near hiiit section not flagged in review track"
         )
+
+
+# -- Bar shift detection --
+
+AUDIO_CLIPS_DIR = os.path.join(REGRESSION_DIR, "audio_clips")
+
+AUDIO_CLIPS_AVAILABLE = os.path.exists(
+    os.path.join(AUDIO_CLIPS_DIR, "shc_old_intro.mp3")
+)
+
+
+@pytest.mark.skipif(not AUDIO_CLIPS_AVAILABLE, reason="Audio clips not available")
+class TestBarShiftDetection:
+    """Bar shift must use majority vote, not just bar 1."""
+
+    def test_bar_shift_majority_vote(self):
+        """Sweet Home Chicago: old has 2-bar intro riff, new has 4-bar.
+
+        DTW matches bar 1 to the wrong repetition (shift=+1),
+        but bars 2+ consistently give shift=+2. Majority vote should
+        detect the correct shift of +2.
+        """
+        from remap_labels import (
+            compute_alignment,
+            determine_bar_shift,
+            load_timestamps,
+            make_warp_func,
+        )
+
+        old_bars = load_timestamps(f"{AUDIO_CLIPS_DIR}/shc_old_bars.txt")
+        new_bars = load_timestamps(f"{AUDIO_CLIPS_DIR}/shc_new_bars.txt")
+
+        old_times, new_times = compute_alignment(
+            f"{AUDIO_CLIPS_DIR}/shc_old_intro.mp3",
+            f"{AUDIO_CLIPS_DIR}/shc_new_intro.mp3",
+        )
+        warp = make_warp_func(old_times, new_times)
+
+        shift = determine_bar_shift(old_bars, new_bars, warp)
+        assert shift == 2, (
+            f"Expected bar shift +2, got +{shift}. "
+            "DTW likely matched intro riff to wrong repetition."
+        )
