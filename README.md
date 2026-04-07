@@ -46,15 +46,10 @@ The process has three stages: generate new beat/bar grids, run the remapper, imp
 ### 1. Generate beats and bars for the new audio
 
 ```bash
-# DBNDownBeatTracker gives beats WITH bar positions (1, 2, 3, 4)
-DBNDownBeatTracker single new_audio.mp3 > new_downbeats.txt
-
-# Extract beat grid (all beats)
-awk '{printf "%.6f\n", $1}' new_downbeats.txt > new_beats.txt
-
-# Extract bar grid (downbeats only, as Audacity point labels)
-awk '$2==1 {n++; printf "%.6f\t%.6f\t%d\n", $1, $1, n}' new_downbeats.txt > new_bars.txt
+gen_grids.py new_audio.mp3
 ```
+
+Runs DBNDownBeatTracker and creates `beats_<songname>.txt` and `bars_<songname>.txt` in the same directory as the mp3.
 
 ### 2. Run remap_labels
 
@@ -112,9 +107,7 @@ All label files listed at the end are remapped. Output goes to `remapped/` (over
 cd blues_brothers_everybody_needs_somebody/
 
 # Step 1: new beats/bars
-DBNDownBeatTracker single 21_Everybody_needs_somebody_Playback_band.mp3 > new_downbeats.txt
-awk '{printf "%.6f\n", $1}' new_downbeats.txt > new_beats.txt
-awk '$2==1 {n++; printf "%.6f\t%.6f\t%d\n", $1, $1, n}' new_downbeats.txt > new_bars.txt
+gen_grids.py 21_Everybody_needs_somebody_Playback_band.mp3
 
 # Step 2: remap
 remap_labels.py \
