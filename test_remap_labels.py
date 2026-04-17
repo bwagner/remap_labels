@@ -370,6 +370,70 @@ class TestParseToAbsoluteBarBeat:
         assert labels[0].start < labels[1].start
         assert labels[0].end <= labels[1].start + 0.001
 
+    def test_anacrusis_sub_beat_end_preserved(self):
+        """Label ending mid-anacrusis-beat should not snap to bar 1."""
+        from remap_labels import parse_labels_to_bar_beat, reconstruct_labels
+
+        beat_grid = [0.5 + i * 0.5 for i in range(32)]
+        bar_grid = [beat_grid[1 + i * 4] for i in range(7)]  # bar 1 at 1.0
+
+        # Chord starts on anacrusis beat (0.5) and ends mid-anacrusis-beat (0.75)
+        anacrusis_sub = [LabelEntry(0.5, 0.75, "Dbm7b5")]
+        entries = parse_labels_to_bar_beat(anacrusis_sub, beat_grid, bar_grid)
+        labels, _ = reconstruct_labels(entries, beat_grid, bar_grid, 4)
+
+        assert len(labels) == 1
+        assert abs(labels[0].end - 0.75) < 0.01, (
+            f"Sub-beat anacrusis end should stay at 0.75, got {labels[0].end}"
+        )
+
+    def test_sub_beat_past_last_beat_in_bar_keeps_duration(self):
+        """Label spanning bar-N beat-4 to past-beat-4 must not collapse to a point."""
+        from remap_labels import parse_labels_to_bar_beat, reconstruct_labels
+
+        # beat_grid 0.5s spacing, bar every 4 beats -> bar 0 beats at 0,0.5,1.0,1.5; bar 1 at 2.0
+        beat_grid = [0.5 * i for i in range(32)]
+        bar_grid = [beat_grid[i] for i in range(0, 32, 4)]
+
+        # Chord: bar 0 beat 4 (1.5) to mid-way between beat 4 and bar 1 (1.85)
+        chord = [
+            LabelEntry(1.5, 1.85, "X"),
+            LabelEntry(1.85, 2.0, "Y"),
+        ]
+        entries = parse_labels_to_bar_beat(chord, beat_grid, bar_grid)
+        labels, _ = reconstruct_labels(entries, beat_grid, bar_grid, 4)
+
+        assert len(labels) == 2
+        assert labels[0].end > labels[0].start, (
+            f"X must have duration, got start={labels[0].start} end={labels[0].end}"
+        )
+        assert abs(labels[0].end - 1.85) < 0.05, (
+            f"X end should be near 1.85 (mid-way past beat 4), got {labels[0].end}"
+        )
+        assert labels[0].end <= labels[1].start + 0.001, "X-Y must not overlap"
+
+    def test_anacrusis_chain_no_overlap(self):
+        """Chained sub-beat chords in anacrusis must stay chained after round-trip."""
+        from remap_labels import parse_labels_to_bar_beat, reconstruct_labels
+
+        beat_grid = [0.5 + i * 0.5 for i in range(32)]
+        bar_grid = [beat_grid[1 + i * 4] for i in range(7)]  # bar 1 at 1.0
+
+        chain = [
+            LabelEntry(0.5, 0.75, "Dbm7b5"),        # first half of anacrusis beat
+            LabelEntry(0.75, 1.0, "Dbm7b5/E"),      # second half of anacrusis beat
+            LabelEntry(1.0, 3.0, "Am"),             # bar 1 onwards
+        ]
+        entries = parse_labels_to_bar_beat(chain, beat_grid, bar_grid)
+        labels, _ = reconstruct_labels(entries, beat_grid, bar_grid, 4)
+
+        assert len(labels) == 3
+        for i in range(len(labels) - 1):
+            assert labels[i].end <= labels[i + 1].start + 0.001, (
+                f"Overlap: '{labels[i].label}' ends at {labels[i].end:.6f} "
+                f"but '{labels[i+1].label}' starts at {labels[i+1].start:.6f}"
+            )
+
     def test_non_overlapping_input_produces_non_overlapping_output(self):
         """If input labels don't overlap, output labels must not overlap either.
 

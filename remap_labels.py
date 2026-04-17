@@ -414,6 +414,18 @@ def _beat_position_in_bar(
     return 0
 
 
+def _next_beat_time(
+    abs_bar: int, whole_beat: int, bar_beats: list[int],
+    beat_grid: list[float], bar_grid: list[float],
+) -> float | None:
+    """Time of the beat after (abs_bar, whole_beat): next beat in bar, or next bar's start."""
+    if whole_beat + 1 < len(bar_beats):
+        return beat_grid[bar_beats[whole_beat + 1]]
+    if abs_bar + 1 < len(bar_grid):
+        return bar_grid[abs_bar + 1]
+    return None
+
+
 def _fractional_beat_in_bar(
     t: float, bar_idx: int, beat_grid: list[float], bar_grid: list[float],
 ) -> Fraction:
@@ -497,8 +509,10 @@ def reconstruct_section(
 
             if whole_beat < len(bar_beats):
                 beat_time = beat_grid[bar_beats[whole_beat]]
-                if sub_beat_frac > 0 and whole_beat + 1 < len(bar_beats):
-                    next_beat_time = beat_grid[bar_beats[whole_beat + 1]]
+                next_beat_time = _next_beat_time(
+                    abs_bar, whole_beat, bar_beats, beat_grid, bar_grid,
+                )
+                if sub_beat_frac > 0 and next_beat_time is not None:
                     start_time = beat_time + sub_beat_frac * (next_beat_time - beat_time)
                 else:
                     start_time = beat_time
@@ -511,6 +525,19 @@ def reconstruct_section(
 
         # Compute end position: start offset + duration, both fractional
         end_bar_offset = entry.bar_offset + entry.bar_count
+
+        if end_bar_offset < 0:
+            # End in anacrusis (symmetric to start branch above)
+            bar1_time = bar_grid[section_start_bar]
+            bar1_beats = _beats_in_bar(section_start_bar, beat_grid, bar_grid)
+            if len(bar1_beats) >= 2:
+                beat_dur = beat_grid[bar1_beats[1]] - beat_grid[bar1_beats[0]]
+            else:
+                beat_dur = (bar_grid[1] - bar_grid[0]) / beats_per_bar if len(bar_grid) > 1 else 0.5
+            end_time = bar1_time + float(end_bar_offset) * beats_per_bar * beat_dur
+            labels.append(LabelEntry(start_time, end_time, entry.label))
+            continue
+
         end_whole_bars = int(end_bar_offset)
         end_frac_in_bar = (end_bar_offset - end_whole_bars) * beats_per_bar
         end_abs_bar = section_start_bar + end_whole_bars
@@ -543,8 +570,10 @@ def reconstruct_section(
             end_bar_beats = _beats_in_bar(end_abs_bar, beat_grid, bar_grid)
             if end_whole_beat < len(end_bar_beats):
                 end_beat_time = beat_grid[end_bar_beats[end_whole_beat]]
-                if end_sub_beat_frac > 0 and end_whole_beat + 1 < len(end_bar_beats):
-                    next_end_beat = beat_grid[end_bar_beats[end_whole_beat + 1]]
+                next_end_beat = _next_beat_time(
+                    end_abs_bar, end_whole_beat, end_bar_beats, beat_grid, bar_grid,
+                )
+                if end_sub_beat_frac > 0 and next_end_beat is not None:
                     end_time = end_beat_time + end_sub_beat_frac * (next_end_beat - end_beat_time)
                 else:
                     end_time = end_beat_time
@@ -569,6 +598,50 @@ def reconstruct_section(
     return labels, warnings
 
 
+def _time_to_bar_offset(
+    t: float, beat_grid: list[float], bar_grid: list[float],
+) -> Fraction:
+    """Map an absolute time to a bar_offset (Fraction). Handles anacrusis (t < bar 1)."""
+    if t < bar_grid[0] - GRID_MATCH_TOLERANCE:
+        bar_beats = _beats_in_bar(0, beat_grid, bar_grid)
+        beats_per_bar = max(len(bar_beats), 1)
+        pickup_beats = [i for i, bt in enumerate(beat_grid) if bt < bar_grid[0] - GRID_MATCH_TOLERANCE]
+        if pickup_beats:
+            beats_before = len(pickup_beats)
+            for pi, pbi in enumerate(pickup_beats):
+                if pi + 1 < len(pickup_beats):
+                    next_pbi = pickup_beats[pi + 1]
+                    if beat_grid[pbi] <= t <= beat_grid[next_pbi]:
+                        frac = (t - beat_grid[pbi]) / (beat_grid[next_pbi] - beat_grid[pbi])
+                        beat_pos = -(beats_before - pi) + frac
+                        return Fraction(beat_pos).limit_denominator(1000) / beats_per_bar
+                else:
+                    # Last pickup beat: interpolate toward bar 1
+                    if beat_grid[pbi] <= t <= bar_grid[0]:
+                        frac = (t - beat_grid[pbi]) / (bar_grid[0] - beat_grid[pbi])
+                        beat_pos = -(beats_before - pi) + frac
+                        return Fraction(beat_pos).limit_denominator(1000) / beats_per_bar
+                    if abs(beat_grid[pbi] - t) < GRID_MATCH_TOLERANCE:
+                        return Fraction(-(beats_before - pi)) / beats_per_bar
+            # Before first pickup beat
+            beat_pos = -beats_before - Fraction(
+                int((beat_grid[pickup_beats[0]] - t) * 1000),
+                int((beat_grid[1] - beat_grid[0]) * 1000),
+            )
+            return Fraction(beat_pos) / beats_per_bar
+        # No pickup beats - estimate from bar spacing
+        bar_dur = bar_grid[1] - bar_grid[0] if len(bar_grid) > 1 else 1.0
+        return -Fraction(
+            int((bar_grid[0] - t) * 1000),
+            int(bar_dur * 1000),
+        )
+    chord_bar = _find_bar_for_time(t, bar_grid)
+    frac_beat = _fractional_beat_in_bar(t, chord_bar, beat_grid, bar_grid)
+    bar_beats = _beats_in_bar(chord_bar, beat_grid, bar_grid)
+    beats_per_bar = max(len(bar_beats), 1)
+    return Fraction(chord_bar) + frac_beat / beats_per_bar
+
+
 def parse_labels_to_bar_beat(
     labels: list[LabelEntry],
     beat_grid: list[float],
@@ -581,49 +654,10 @@ def parse_labels_to_bar_beat(
     No section logic - positions are absolute.
     """
     entries = []
+    bar0_beats = max(len(_beats_in_bar(0, beat_grid, bar_grid)), 1)
+    min_duration = Fraction(1, bar0_beats * 4)
     for label in labels:
-        if label.start < bar_grid[0] - GRID_MATCH_TOLERANCE:
-            # Pickup/anacrusis: compute negative bar_offset
-            bar_beats = _beats_in_bar(0, beat_grid, bar_grid)
-            beats_per_bar = max(len(bar_beats), 1)
-            # Find pickup beats (before bar 1)
-            pickup_beats = [i for i, t in enumerate(beat_grid) if t < bar_grid[0] - GRID_MATCH_TOLERANCE]
-            if pickup_beats:
-                # Interpolate within pickup beats
-                beats_before = len(pickup_beats)
-                # Position relative to bar 0: which pickup beat, interpolated
-                for pi, pbi in enumerate(pickup_beats):
-                    if pi + 1 < len(pickup_beats):
-                        if beat_grid[pbi] <= label.start <= beat_grid[pickup_beats[pi + 1]]:
-                            frac = (label.start - beat_grid[pbi]) / (beat_grid[pickup_beats[pi + 1]] - beat_grid[pbi])
-                            beat_pos = -(beats_before - pi) + frac
-                            break
-                    elif abs(beat_grid[pbi] - label.start) < GRID_MATCH_TOLERANCE:
-                        beat_pos = -(beats_before - pi)
-                        break
-                else:
-                    # Before first beat
-                    beat_pos = -beats_before - Fraction(
-                        int((beat_grid[pickup_beats[0]] - label.start) * 1000),
-                        int((beat_grid[1] - beat_grid[0]) * 1000),
-                    )
-                bar_offset = Fraction(beat_pos) / beats_per_bar
-            else:
-                # No pickup beats, estimate from bar spacing
-                bar_dur = bar_grid[1] - bar_grid[0] if len(bar_grid) > 1 else 1.0
-                bar_offset = -Fraction(
-                    int((bar_grid[0] - label.start) * 1000),
-                    int(bar_dur * 1000),
-                )
-        else:
-            chord_bar = _find_bar_for_time(label.start, bar_grid)
-            frac_beat = _fractional_beat_in_bar(
-                label.start, chord_bar, beat_grid, bar_grid,
-            )
-            bar_beats = _beats_in_bar(chord_bar, beat_grid, bar_grid)
-            beats_per_bar = max(len(bar_beats), 1)
-            bar_offset = Fraction(chord_bar) + frac_beat / beats_per_bar
-
+        bar_offset = _time_to_bar_offset(label.start, beat_grid, bar_grid)
         if label.is_point:
             entries.append(SectionEntry(
                 bar_offset=bar_offset,
@@ -632,14 +666,8 @@ def parse_labels_to_bar_beat(
                 bar_count=Fraction(0),
             ))
         else:
-            end_bar = _find_bar_for_time(label.end, bar_grid)
-            end_frac_beat = _fractional_beat_in_bar(
-                label.end, end_bar, beat_grid, bar_grid,
-            )
-            end_bar_beats = _beats_in_bar(end_bar, beat_grid, bar_grid)
-            end_bpb = max(len(end_bar_beats), 1)
-            end_offset = Fraction(end_bar) + end_frac_beat / end_bpb
-            bar_count = max(end_offset - bar_offset, Fraction(1, beats_per_bar * 4))
+            end_offset = _time_to_bar_offset(label.end, beat_grid, bar_grid)
+            bar_count = max(end_offset - bar_offset, min_duration)
             entries.append(SectionEntry(
                 bar_offset=bar_offset,
                 label=label.label,
