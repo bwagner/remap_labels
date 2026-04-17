@@ -939,3 +939,110 @@ class TestResolveSubseqMode:
 
         with pytest.raises(ValueError):
             resolve_subseq_mode("maybe", 72, 72)
+
+
+# -- Tests for structural_compare --
+
+
+class TestStructuralCompare:
+    """structural_compare returns empty list when label sequences match structurally."""
+
+    def test_identical_returns_no_issues(self):
+        from remap_labels import structural_compare
+
+        labels = [
+            LabelEntry(0.0, 1.0, "C"),
+            LabelEntry(1.0, 2.0, "F"),
+        ]
+        assert structural_compare(labels, labels) == []
+
+    def test_length_mismatch_flagged(self):
+        from remap_labels import structural_compare
+
+        old = [LabelEntry(0.0, 1.0, "C"), LabelEntry(1.0, 2.0, "F")]
+        new = [LabelEntry(0.0, 1.0, "C")]
+        issues = structural_compare(old, new)
+        assert any("count" in issue.lower() or "length" in issue.lower() for issue in issues)
+
+    def test_label_text_mismatch_flagged(self):
+        from remap_labels import structural_compare
+
+        old = [LabelEntry(0.0, 1.0, "C")]
+        new = [LabelEntry(0.0, 1.0, "G")]
+        issues = structural_compare(old, new)
+        assert any("label" in issue.lower() or "C" in issue for issue in issues)
+
+    def test_duration_to_point_collapse_flagged(self):
+        """The minnie bug: a duration chord becoming a point event."""
+        from remap_labels import structural_compare
+
+        old = [LabelEntry(0.0, 1.0, "C")]
+        new = [LabelEntry(0.5, 0.5, "C")]
+        issues = structural_compare(old, new)
+        assert any("point" in issue.lower() or "duration" in issue.lower() for issue in issues)
+
+    def test_point_to_duration_flagged(self):
+        from remap_labels import structural_compare
+
+        old = [LabelEntry(0.5, 0.5, "hit")]
+        new = [LabelEntry(0.0, 1.0, "hit")]
+        issues = structural_compare(old, new)
+        assert any("point" in issue.lower() or "duration" in issue.lower() for issue in issues)
+
+    def test_overlap_in_new_flagged(self):
+        from remap_labels import structural_compare
+
+        old = [
+            LabelEntry(0.0, 1.0, "C"),
+            LabelEntry(1.0, 2.0, "F"),
+        ]
+        new = [
+            LabelEntry(0.0, 1.2, "C"),
+            LabelEntry(1.0, 2.0, "F"),  # starts before C ends
+        ]
+        issues = structural_compare(old, new)
+        assert any("overlap" in issue.lower() for issue in issues)
+
+    def test_tempo_scaled_no_issues(self):
+        """Same topology, new at 1.1x tempo - should report no issues."""
+        from remap_labels import structural_compare
+
+        old = [
+            LabelEntry(0.0, 1.0, "C"),
+            LabelEntry(1.0, 2.0, "F"),
+        ]
+        new = [
+            LabelEntry(0.0, 1.1, "C"),
+            LabelEntry(1.1, 2.2, "F"),
+        ]
+        assert structural_compare(old, new) == []
+
+
+class TestReconstructRoundTripStructural:
+    """Integration test: parse + reconstruct on scaled grid preserves structure."""
+
+    def test_anacrusis_sub_beat_chain_scaled_grid(self):
+        """Minnie-style case: anacrusis + sub-beat + scaled-tempo grid preserves topology."""
+        from remap_labels import (
+            parse_labels_to_bar_beat,
+            reconstruct_labels,
+            structural_compare,
+        )
+
+        old_beat = [0.5 * i for i in range(32)]
+        old_bar = [old_beat[1 + 4 * i] for i in range(7)]
+        new_beat = [0.55 * i for i in range(32)]
+        new_bar = [new_beat[1 + 4 * i] for i in range(7)]
+
+        chords = [
+            LabelEntry(0.5, 0.75, "Dbm7b5"),          # anacrusis, sub-beat end
+            LabelEntry(0.75, 1.0, "Dbm7b5/E"),        # anacrusis, ends on bar 1
+            LabelEntry(1.0, 2.5, "Dbm7b5/G"),         # bar 1 to beat 4
+            LabelEntry(2.5, 2.85, "Ebm7b5/Gb"),       # sub-beat past bar 1 beat 4
+            LabelEntry(2.85, 3.0, "Dbm7b5/E"),        # sub-beat into bar 2
+        ]
+        entries = parse_labels_to_bar_beat(chords, old_beat, old_bar)
+        remapped, _ = reconstruct_labels(entries, new_beat, new_bar, 4)
+
+        issues = structural_compare(chords, remapped)
+        assert issues == [], f"Structural issues: {issues}"

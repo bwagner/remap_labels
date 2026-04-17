@@ -737,6 +737,38 @@ def load_labels(path: str) -> list[LabelEntry]:
     return entries
 
 
+def structural_compare(
+    old: list[LabelEntry], new: list[LabelEntry], tolerance: float = 1e-3,
+) -> list[str]:
+    """Compare two label sequences structurally, ignoring precise timing.
+
+    Checks count, label text (in order), point-vs-duration type, and absence
+    of overlap in `new`. Returns list of issue descriptions; empty means
+    structurally identical.
+    """
+    issues: list[str] = []
+    if len(old) != len(new):
+        issues.append(f"count mismatch: old={len(old)} new={len(new)}")
+
+    for i, (o, n) in enumerate(zip(old, new)):
+        if o.label != n.label:
+            issues.append(f"[{i}] label text mismatch: {o.label!r} -> {n.label!r}")
+        o_point = abs(o.end - o.start) < tolerance
+        n_point = abs(n.end - n.start) < tolerance
+        if o_point != n_point:
+            kind = "duration->point" if not o_point else "point->duration"
+            issues.append(f"[{i}] {kind} for {o.label!r}")
+
+    for i in range(len(new) - 1):
+        if new[i].end > new[i + 1].start + tolerance:
+            issues.append(
+                f"[{i}] overlap: {new[i].label!r} ends at {new[i].end:.6f} "
+                f"but {new[i+1].label!r} starts at {new[i+1].start:.6f}"
+            )
+
+    return issues
+
+
 def main(
     old_audio: str,
     new_audio: str,
