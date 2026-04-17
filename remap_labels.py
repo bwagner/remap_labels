@@ -75,6 +75,56 @@ SCAN_WINDOW_S = 4.0
 # from zero-magnitude frames (silence)
 CHROMA_EPSILON = 1e-10
 
+AUDIO_EXTS = {".mp3", ".m4a", ".opus", ".wav", ".flac", ".ogg", ".aac", ".wma"}
+
+
+@dataclass
+class DiscoveredInputs:
+    audio: Path
+    beats: Path
+    bars: Path
+    labels: list[Path] | None
+
+
+def discover_dir_inputs(directory: Path, want_labels: bool) -> DiscoveredInputs:
+    """Pick audio + beats_<stem>.txt + bars_<stem>.txt + (labels) from a dir.
+
+    Labels are any *_<stem>.txt except beats_/bars_. want_labels=False returns labels=None.
+    Raises ValueError on zero/multiple audio or missing beats/bars.
+    """
+    directory = Path(directory)
+    audios = sorted(p for p in directory.iterdir() if p.suffix.lower() in AUDIO_EXTS)
+    if not audios:
+        raise ValueError(f"no audio file in {directory}")
+    if len(audios) > 1:
+        names = ", ".join(p.name for p in audios)
+        raise ValueError(f"multiple audio files in {directory}: {names}")
+    audio = audios[0]
+    stem = audio.stem
+
+    beats = directory / f"beats_{stem}.txt"
+    if not beats.is_file():
+        raise ValueError(f"missing beats file: {beats.name} in {directory}")
+    bars = directory / f"bars_{stem}.txt"
+    if not bars.is_file():
+        raise ValueError(f"missing bars file: {bars.name} in {directory}")
+
+    labels: list[Path] | None = None
+    if want_labels:
+        labels = sorted(
+            p for p in directory.iterdir()
+            if p.suffix == ".txt"
+            and p.name not in (beats.name, bars.name)
+            and _matches_label_pattern(p.stem, stem)
+        )
+    return DiscoveredInputs(audio=audio, beats=beats, bars=bars, labels=labels)
+
+
+def _matches_label_pattern(file_stem: str, audio_stem: str) -> bool:
+    """True if file_stem is '<category>_<audio_stem>' with non-empty category."""
+    prefix, sep, rest = file_stem.partition("_")
+    return bool(sep) and bool(prefix) and rest == audio_stem
+
 
 def load_timestamps(path: str) -> list[float]:
     """Load timestamps (first column) from an Audacity label file."""

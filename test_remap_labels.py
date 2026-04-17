@@ -713,3 +713,111 @@ class TestBarShiftDetection:
             f"Expected non-positive bar shift, got +{shift}. "
             "Subsequence DTW should find short clip within long clip."
         )
+
+
+# -- Tests for dir-mode CLI discovery --
+
+
+class TestDiscoverDirInputs:
+    """discover_dir_inputs(directory, want_labels) picks audio + beats/bars/labels by stem."""
+
+    def _make(self, tmp_path, files):
+        for name in files:
+            (tmp_path / name).write_text("")
+        return tmp_path
+
+    def test_single_audio_gets_stem(self, tmp_path):
+        from remap_labels import discover_dir_inputs
+
+        d = self._make(tmp_path, [
+            "song_a.mp3",
+            "beats_song_a.txt",
+            "bars_song_a.txt",
+        ])
+        result = discover_dir_inputs(d, want_labels=False)
+        assert result.audio.name == "song_a.mp3"
+        assert result.beats.name == "beats_song_a.txt"
+        assert result.bars.name == "bars_song_a.txt"
+
+    def test_zero_audio_errors(self, tmp_path):
+        from remap_labels import discover_dir_inputs
+
+        d = self._make(tmp_path, ["beats_x.txt", "bars_x.txt"])
+        with pytest.raises(ValueError, match="no audio"):
+            discover_dir_inputs(d, want_labels=False)
+
+    def test_multiple_audio_errors(self, tmp_path):
+        from remap_labels import discover_dir_inputs
+
+        d = self._make(tmp_path, [
+            "a.mp3", "b.opus",
+            "beats_a.txt", "bars_a.txt",
+        ])
+        with pytest.raises(ValueError, match="multiple audio"):
+            discover_dir_inputs(d, want_labels=False)
+
+    def test_missing_beats_errors(self, tmp_path):
+        from remap_labels import discover_dir_inputs
+
+        d = self._make(tmp_path, ["song.mp3", "bars_song.txt"])
+        with pytest.raises(ValueError, match="beats_song.txt"):
+            discover_dir_inputs(d, want_labels=False)
+
+    def test_missing_bars_errors(self, tmp_path):
+        from remap_labels import discover_dir_inputs
+
+        d = self._make(tmp_path, ["song.mp3", "beats_song.txt"])
+        with pytest.raises(ValueError, match="bars_song.txt"):
+            discover_dir_inputs(d, want_labels=False)
+
+    def test_finds_labels_matching_stem(self, tmp_path):
+        from remap_labels import discover_dir_inputs
+
+        d = self._make(tmp_path, [
+            "song.mp3",
+            "beats_song.txt",
+            "bars_song.txt",
+            "chords_song.txt",
+            "parts_song.txt",
+            "guit_song.txt",
+        ])
+        result = discover_dir_inputs(d, want_labels=True)
+        label_names = sorted(p.name for p in result.labels)
+        assert label_names == ["chords_song.txt", "guit_song.txt", "parts_song.txt"]
+
+    def test_ignores_unrelated_stem_files(self, tmp_path):
+        from remap_labels import discover_dir_inputs
+
+        d = self._make(tmp_path, [
+            "song.mp3",
+            "beats_song.txt",
+            "bars_song.txt",
+            "chords_song.txt",
+            "chords_other_song.txt",  # different stem, ignored
+            "notes.txt",               # no stem suffix, ignored
+        ])
+        result = discover_dir_inputs(d, want_labels=True)
+        label_names = [p.name for p in result.labels]
+        assert label_names == ["chords_song.txt"]
+
+    def test_new_dir_skips_labels(self, tmp_path):
+        from remap_labels import discover_dir_inputs
+
+        d = self._make(tmp_path, [
+            "new_song.opus",
+            "beats_new_song.txt",
+            "bars_new_song.txt",
+            "chords_new_song.txt",  # present but not requested
+        ])
+        result = discover_dir_inputs(d, want_labels=False)
+        assert result.labels is None
+
+    def test_all_audio_exts_recognized(self, tmp_path):
+        from remap_labels import discover_dir_inputs
+
+        for ext in ("mp3", "m4a", "opus", "wav", "flac", "ogg", "aac", "wma"):
+            sub = tmp_path / ext
+            sub.mkdir()
+            self._make(sub, [f"x.{ext}", "beats_x.txt", "bars_x.txt"])
+            result = discover_dir_inputs(sub, want_labels=False)
+            assert result.audio.suffix == f".{ext}"
