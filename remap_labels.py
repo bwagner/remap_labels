@@ -843,54 +843,121 @@ def main(
     print(f"\nDone. Check {outdir}/ and verify in Audacity.")
 
 
+def _resolve_cli_inputs(args) -> tuple[str, str, str, str, str, str, list[str], str]:
+    """Resolve CLI args into (old_audio, new_audio, new_beats, new_bars,
+    old_beats, old_bars, labels, outdir). Handles dir-mode auto-discovery."""
+    old_is_dir = Path(args.old_audio).is_dir()
+    new_is_dir = Path(args.new_audio).is_dir()
+    if old_is_dir != new_is_dir:
+        print(
+            "Error: old_audio and new_audio must both be files or both be directories.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if old_is_dir:
+        try:
+            old = discover_dir_inputs(Path(args.old_audio), want_labels=True)
+            new = discover_dir_inputs(Path(args.new_audio), want_labels=False)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not old.labels:
+            print(
+                f"Error: no label files found in {args.old_audio} "
+                f"(expected <category>_{old.audio.stem}.txt).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        extras = []
+        for flag, val in [
+            ("--old-beats", args.old_beats), ("--old-bars", args.old_bars),
+            ("-b", args.new_beats), ("-B", args.new_bars),
+        ]:
+            if val is not None:
+                extras.append((flag, val))
+        if extras or args.labels:
+            print(
+                "Error: in dir-mode, do not pass --old-beats/--old-bars/-b/-B "
+                "or positional label files; they are auto-discovered.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        outdir = args.outdir if args.outdir else str(new.audio.parent)
+        expanded = [
+            "remap_labels.py",
+            str(old.audio), str(new.audio),
+            "--old-beats", str(old.beats),
+            "--old-bars", str(old.bars),
+            "-b", str(new.beats),
+            "-B", str(new.bars),
+            "-o", outdir,
+            *(str(p) for p in old.labels),
+        ]
+        print("Dir-mode detected. Expanded CLI:")
+        print("  " + " \\\n    ".join(expanded))
+        print()
+        return (
+            str(old.audio), str(new.audio),
+            str(new.beats), str(new.bars),
+            str(old.beats), str(old.bars),
+            [str(p) for p in old.labels],
+            outdir,
+        )
+
+    missing = [
+        name for name, val in [
+            ("--old-beats", args.old_beats), ("--old-bars", args.old_bars),
+            ("-b/--new-beats", args.new_beats), ("-B/--new-bars", args.new_bars),
+        ] if val is None
+    ]
+    if missing:
+        print(
+            f"Error: file-mode requires: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not args.labels:
+        print("Error: provide at least one label file to remap.", file=sys.stderr)
+        sys.exit(1)
+
+    outdir = args.outdir if args.outdir else str(Path(args.new_audio).parent)
+    return (
+        args.old_audio, args.new_audio,
+        args.new_beats, args.new_bars,
+        args.old_beats, args.old_bars,
+        args.labels, outdir,
+    )
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Remap Audacity labels from old audio to new audio."
+        description=(
+            "Remap Audacity labels from old audio to new audio. "
+            "Pass two directories for auto-discovery mode."
+        )
     )
     parser.add_argument(
         "-V", "--version", action="version",
         version=get_version_info(__version__),
     )
-    parser.add_argument("old_audio", help="Original audio file")
-    parser.add_argument("new_audio", help="New (replacement) audio file")
+    parser.add_argument("old_audio", help="Original audio file or directory")
+    parser.add_argument("new_audio", help="New (replacement) audio file or directory")
     parser.add_argument(
-        "labels", nargs="*", help="Label .txt files to remap"
+        "labels", nargs="*", help="Label .txt files to remap (file-mode only)"
     )
+    parser.add_argument("--old-beats", help="Old beats file (file-mode only)")
+    parser.add_argument("--old-bars", help="Old bars file (file-mode only)")
+    parser.add_argument("-b", "--new-beats", help="New beats file (file-mode only)")
+    parser.add_argument("-B", "--new-bars", help="New bars file (file-mode only)")
     parser.add_argument(
-        "--old-beats", required=True,
-        help="Old beats file",
-    )
-    parser.add_argument(
-        "--old-bars", required=True,
-        help="Old bars file",
-    )
-    parser.add_argument(
-        "-b", "--new-beats", required=True,
-        help="New beats file",
-    )
-    parser.add_argument(
-        "-B", "--new-bars", required=True,
-        help="New bars file",
-    )
-    parser.add_argument(
-        "-o", "--outdir", default="remapped",
-        help="Output directory (default: remapped/)",
+        "-o", "--outdir", default=None,
+        help="Output directory (default: directory of new_audio)",
     )
     args = parser.parse_args()
 
-    if not args.labels:
-        print("Error: provide at least one label file to remap.", file=sys.stderr)
-        sys.exit(1)
-
-    main(
-        args.old_audio,
-        args.new_audio,
-        args.new_beats,
-        args.new_bars,
-        args.old_beats,
-        args.old_bars,
-        args.labels,
-        args.outdir,
-    )
+    resolved = _resolve_cli_inputs(args)
+    main(*resolved[:2], *resolved[2:6], resolved[6], resolved[7])
