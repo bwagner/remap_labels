@@ -3,12 +3,22 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""Generate beats and bars grid files from an mp3 using DBNDownBeatTracker.
+"""Generate beats and bars grid files from an audio file using DBNDownBeatTracker.
+
+Accepts any audio format madmom/ffmpeg can decode (mp3, m4a, opus, wav, flac, ...).
 
 Usage:
     gen_grids.py song.mp3
+    gen_grids.py song.m4a
+    gen_grids.py --beats-per-bar 5 mission_impossible.m4a
+    gen_grids.py --beats-per-bar 3,4 waltz_or_common.mp3
 
 Creates beats_<songname>.txt and bars_<songname>.txt in the same directory.
+
+The --beats-per-bar value is forwarded verbatim to DBNDownBeatTracker's
+--beats_per_bar (comma-separated list of candidate bar lengths in beats).
+DBN's default is 3,4. Pass a single value to force a time signature, or a
+list to let DBN choose among candidates.
 """
 
 import subprocess
@@ -16,7 +26,16 @@ import sys
 from pathlib import Path
 
 
-def gen_grids(mp3_path: str) -> tuple[str, str]:
+def _build_dbn_command(mp3_path: str, beats_per_bar: str | None = None) -> list[str]:
+    """Construct the DBNDownBeatTracker command. --beats_per_bar must precede 'single'."""
+    cmd = ["DBNDownBeatTracker"]
+    if beats_per_bar:
+        cmd += ["--beats_per_bar", beats_per_bar]
+    cmd += ["single", str(mp3_path)]
+    return cmd
+
+
+def gen_grids(mp3_path: str, beats_per_bar: str | None = None) -> tuple[str, str]:
     """Run DBNDownBeatTracker and write beats/bars grid files.
 
     Returns (beats_path, bars_path).
@@ -27,11 +46,9 @@ def gen_grids(mp3_path: str) -> tuple[str, str]:
     beats_path = directory / f"beats_{songname}.txt"
     bars_path = directory / f"bars_{songname}.txt"
 
-    print(f"Running DBNDownBeatTracker on {mp3}...")
-    result = subprocess.run(
-        ["DBNDownBeatTracker", "single", str(mp3)],
-        capture_output=True, text=True, check=True,
-    )
+    cmd = _build_dbn_command(str(mp3), beats_per_bar=beats_per_bar)
+    print(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
     beats_lines = []
     bars_lines = []
@@ -61,9 +78,17 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Generate beats and bars grid files from an mp3.",
+        description="Generate beats and bars grid files from an audio file.",
     )
-    parser.add_argument("mp3", help="Audio file (.mp3)")
+    parser.add_argument("mp3", help="Audio file (mp3, m4a, opus, wav, flac, ...)")
+    parser.add_argument(
+        "-b", "--beats-per-bar", default=None,
+        help=(
+            "Candidate bar lengths in beats (comma-separated list). "
+            "Forwarded to DBNDownBeatTracker --beats_per_bar. "
+            "Examples: 5 (force 5/4), 3,4 (DBN chooses, its default), 4,5."
+        ),
+    )
     args = parser.parse_args()
 
     mp3 = Path(args.mp3)
@@ -71,4 +96,4 @@ if __name__ == "__main__":
         print(f"Error: file not found: {mp3}", file=sys.stderr)
         sys.exit(1)
 
-    gen_grids(str(mp3))
+    gen_grids(str(mp3), beats_per_bar=args.beats_per_bar)
