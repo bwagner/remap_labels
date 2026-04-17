@@ -1,3 +1,13 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "pytest",
+#     "librosa>=0.11",
+#     "soundfile",
+#     "numpy",
+# ]
+# ///
 """Tests for v6 musical-structure label remapping (Fraction-based)."""
 
 import os
