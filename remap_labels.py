@@ -642,7 +642,7 @@ def load_labels(path: str) -> list[LabelEntry]:
     return entries
 
 
-def main_v7(
+def main(
     old_audio: str,
     new_audio: str,
     new_beats_path: str,
@@ -652,7 +652,7 @@ def main_v7(
     label_files: list[str],
     outdir: str,
 ) -> None:
-    """v7: Direct bar/beat remapping without sections.
+    """Direct bar/beat remapping without sections.
 
     Each label is parsed to absolute (bar, beat), DTW finds bar 1 offset,
     labels are shifted and placed on the new grid.
@@ -834,7 +834,7 @@ if __name__ == "__main__":
         print("Error: provide at least one label file to remap.", file=sys.stderr)
         sys.exit(1)
 
-    main_v7(
+    main(
         args.old_audio,
         args.new_audio,
         args.new_beats,
