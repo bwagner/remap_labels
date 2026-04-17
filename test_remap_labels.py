@@ -821,3 +821,57 @@ class TestDiscoverDirInputs:
             self._make(sub, [f"x.{ext}", "beats_x.txt", "bars_x.txt"])
             result = discover_dir_inputs(sub, want_labels=False)
             assert result.audio.suffix == f".{ext}"
+
+
+# -- Tests for subseq mode resolution --
+
+
+class TestResolveSubseqMode:
+    """resolve_subseq_mode turns 'auto'/'on'/'off' into the DTW subseq flag."""
+
+    def test_on_forces_true_regardless_of_bars(self):
+        from remap_labels import resolve_subseq_mode
+
+        assert resolve_subseq_mode("on", 72, 72) is True
+        assert resolve_subseq_mode("on", 10, 72) is True
+
+    def test_off_forces_false_regardless_of_bars(self):
+        from remap_labels import resolve_subseq_mode
+
+        assert resolve_subseq_mode("off", 72, 72) is False
+        assert resolve_subseq_mode("off", 10, 72) is False
+
+    def test_auto_equal_bars_off(self):
+        from remap_labels import resolve_subseq_mode
+
+        assert resolve_subseq_mode("auto", 72, 72) is False
+
+    def test_auto_close_bars_off(self):
+        from remap_labels import resolve_subseq_mode
+
+        # 60/72 = 0.83, well above threshold 0.5
+        assert resolve_subseq_mode("auto", 60, 72) is False
+
+    def test_auto_very_different_bars_on(self):
+        from remap_labels import resolve_subseq_mode
+
+        # 10/72 = 0.14, below threshold 0.5
+        assert resolve_subseq_mode("auto", 10, 72) is True
+
+    def test_auto_at_boundary_stays_off(self):
+        from remap_labels import resolve_subseq_mode
+
+        # 36/72 = 0.5 exactly, NOT below threshold -> off
+        assert resolve_subseq_mode("auto", 36, 72) is False
+
+    def test_auto_just_below_boundary_on(self):
+        from remap_labels import resolve_subseq_mode
+
+        # 35/72 = 0.486, below 0.5 -> on
+        assert resolve_subseq_mode("auto", 35, 72) is True
+
+    def test_invalid_mode_raises(self):
+        from remap_labels import resolve_subseq_mode
+
+        with pytest.raises(ValueError):
+            resolve_subseq_mode("maybe", 72, 72)

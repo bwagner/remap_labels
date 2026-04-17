@@ -77,6 +77,23 @@ CHROMA_EPSILON = 1e-10
 
 AUDIO_EXTS = {".mp3", ".m4a", ".opus", ".wav", ".flac", ".ogg", ".aac", ".wma"}
 
+# Below this bar-count ratio (min/max) auto-mode treats one audio as a
+# subsequence of the other (clip/excerpt); at or above, both are full songs.
+SUBSEQ_BAR_RATIO_THRESHOLD = 0.5
+
+
+def resolve_subseq_mode(mode: str, old_bar_count: int, new_bar_count: int) -> bool:
+    """Resolve 'auto'/'on'/'off' into the DTW subseq flag."""
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    if mode == "auto":
+        smaller = min(old_bar_count, new_bar_count)
+        larger = max(old_bar_count, new_bar_count)
+        return smaller / larger < SUBSEQ_BAR_RATIO_THRESHOLD
+    raise ValueError(f"invalid subseq mode: {mode!r} (expected auto/on/off)")
+
 
 @dataclass
 class DiscoveredInputs:
@@ -142,7 +159,7 @@ def load_timestamps(path: str) -> list[float]:
     return sorted(set(times))
 
 
-def compute_alignment(old_audio: str, new_audio: str):
+def compute_alignment(old_audio: str, new_audio: str, subseq: bool = True):
     """Compute DTW alignment. Returns (old_times, new_times) from the path."""
     import librosa
 
@@ -158,8 +175,8 @@ def compute_alignment(old_audio: str, new_audio: str):
     chroma_old = chroma_old + CHROMA_EPSILON
     chroma_new = chroma_new + CHROMA_EPSILON
 
-    print(f"Running DTW ({chroma_old.shape[1]} x {chroma_new.shape[1]} frames)...")
-    _D, wp = librosa.sequence.dtw(X=chroma_old, Y=chroma_new, metric="cosine", subseq=True)
+    print(f"Running DTW ({chroma_old.shape[1]} x {chroma_new.shape[1]} frames, subseq={subseq})...")
+    _D, wp = librosa.sequence.dtw(X=chroma_old, Y=chroma_new, metric="cosine", subseq=subseq)
     wp = wp[::-1]  # sort ascending
 
     old_frames = wp[:, 0]
@@ -701,6 +718,7 @@ def main(
     old_bars_path: str,
     label_files: list[str],
     outdir: str,
+    subseq_mode: str = "auto",
 ) -> None:
     """Direct bar/beat remapping without sections.
 
@@ -731,7 +749,12 @@ def main(
         print(f"{'='*60}")
 
     # Compute DTW to find bar offset between old and new
-    old_times, new_times = compute_alignment(old_audio, new_audio)
+    subseq = resolve_subseq_mode(subseq_mode, len(old_bar_grid), len(new_bar_grid))
+    print(
+        f"DTW subseq: {subseq} (mode={subseq_mode}, "
+        f"bar counts old={len(old_bar_grid)} new={len(new_bar_grid)})"
+    )
+    old_times, new_times = compute_alignment(old_audio, new_audio, subseq=subseq)
     warp = make_warp_func(old_times, new_times)
 
     bar_shift = determine_bar_shift(old_bar_grid, new_bar_grid, warp)
@@ -957,7 +980,11 @@ if __name__ == "__main__":
         "-o", "--outdir", default=None,
         help="Output directory (default: directory of new_audio)",
     )
+    parser.add_argument(
+        "--subseq", choices=["auto", "on", "off"], default="auto",
+        help="DTW subseq mode: auto picks by bar-count ratio (default)",
+    )
     args = parser.parse_args()
 
     resolved = _resolve_cli_inputs(args)
-    main(*resolved[:2], *resolved[2:6], resolved[6], resolved[7])
+    main(*resolved[:2], *resolved[2:6], resolved[6], resolved[7], subseq_mode=args.subseq)
