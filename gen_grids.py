@@ -35,7 +35,24 @@ def _build_dbn_command(mp3_path: str, beats_per_bar: str | None = None) -> list[
     return cmd
 
 
-def gen_grids(mp3_path: str, beats_per_bar: str | None = None) -> tuple[str, str]:
+def _format_bars(downbeats: list[float], span: bool = False) -> list[str]:
+    """Format downbeat timestamps as bars grid lines.
+
+    Event mode (default): each downbeat as a zero-duration label.
+    Span mode: each bar spans from its downbeat to the next; last bar omitted
+    (end time unknown). Matches beats2bars.py convention.
+    """
+    if span:
+        return [
+            f"{downbeats[i]:.6f}\t{downbeats[i+1]:.6f}\t{i+1}\n"
+            for i in range(len(downbeats) - 1)
+        ]
+    return [f"{t:.6f}\t{t:.6f}\t{i+1}\n" for i, t in enumerate(downbeats)]
+
+
+def gen_grids(
+    mp3_path: str, beats_per_bar: str | None = None, span: bool = False,
+) -> tuple[str, str]:
     """Run DBNDownBeatTracker and write beats/bars grid files.
 
     Returns (beats_path, bars_path).
@@ -51,8 +68,7 @@ def gen_grids(mp3_path: str, beats_per_bar: str | None = None) -> tuple[str, str
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
     beats_lines = []
-    bars_lines = []
-    bar_num = 0
+    downbeats = []
     for line in result.stdout.splitlines():
         parts = line.strip().split()
         if len(parts) < 2:
@@ -61,9 +77,9 @@ def gen_grids(mp3_path: str, beats_per_bar: str | None = None) -> tuple[str, str
         beat_pos = int(parts[1])
         beats_lines.append(f"{timestamp:.6f}\n")
         if beat_pos == 1:
-            bar_num += 1
-            bars_lines.append(f"{timestamp:.6f}\t{timestamp:.6f}\t{bar_num}\n")
+            downbeats.append(timestamp)
 
+    bars_lines = _format_bars(downbeats, span=span)
     beats_path.write_text("".join(beats_lines))
     bars_path.write_text("".join(bars_lines))
 
@@ -89,6 +105,10 @@ if __name__ == "__main__":
             "Examples: 5 (force 5/4), 3,4 (DBN chooses, its default), 4,5."
         ),
     )
+    parser.add_argument(
+        "-s", "--span", action="store_true",
+        help="Emit duration labels (start...end). Default: zero-duration events at each downbeat.",
+    )
     args = parser.parse_args()
 
     mp3 = Path(args.mp3)
@@ -96,4 +116,4 @@ if __name__ == "__main__":
         print(f"Error: file not found: {mp3}", file=sys.stderr)
         sys.exit(1)
 
-    gen_grids(str(mp3), beats_per_bar=args.beats_per_bar)
+    gen_grids(str(mp3), beats_per_bar=args.beats_per_bar, span=args.span)

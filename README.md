@@ -60,6 +60,12 @@ gen_grids.py --beats-per-bar 3,4 waltz_or_common.mp3    # DBN chooses (its defau
 gen_grids.py --beats-per-bar 4,5 song.mp3               # 4/4 or 5/4
 ```
 
+Bars are emitted as zero-duration event labels by default. Pass `-s`/`--span` for duration labels that span each bar (matches `beats2bars.py`'s `--span` convention):
+
+```bash
+gen_grids.py --span song.mp3   # bars are start\tend\tN instead of start\tstart\tN
+```
+
 ### 2. Run remap_labels
 
 ```bash
