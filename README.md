@@ -60,6 +60,12 @@ gen_grids.py --beats-per-bar 3,4 waltz_or_common.mp3    # DBN chooses (its defau
 gen_grids.py --beats-per-bar 4,5 song.mp3               # 4/4 or 5/4
 ```
 
+For songs where DBN loses tempo mid-track (e.g. locking onto a subdivision), constrain the tempo range:
+
+```bash
+gen_grids.py --min-bpm 130 --max-bpm 160 song.mp3   # forwarded to DBN's --min_bpm/--max_bpm
+```
+
 Bars are emitted as zero-duration event labels by default. Pass `-s`/`--span` for duration labels that span each bar (matches `beats2bars.py`'s `--span` convention):
 
 ```bash

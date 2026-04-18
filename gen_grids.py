@@ -26,11 +26,20 @@ import sys
 from pathlib import Path
 
 
-def _build_dbn_command(mp3_path: str, beats_per_bar: str | None = None) -> list[str]:
-    """Construct the DBNDownBeatTracker command. --beats_per_bar must precede 'single'."""
+def _build_dbn_command(
+    mp3_path: str,
+    beats_per_bar: str | None = None,
+    min_bpm: str | None = None,
+    max_bpm: str | None = None,
+) -> list[str]:
+    """Construct the DBNDownBeatTracker command. All DBN options must precede 'single'."""
     cmd = ["DBNDownBeatTracker"]
     if beats_per_bar:
         cmd += ["--beats_per_bar", beats_per_bar]
+    if min_bpm:
+        cmd += ["--min_bpm", min_bpm]
+    if max_bpm:
+        cmd += ["--max_bpm", max_bpm]
     cmd += ["single", str(mp3_path)]
     return cmd
 
@@ -51,7 +60,11 @@ def _format_bars(downbeats: list[float], span: bool = False) -> list[str]:
 
 
 def gen_grids(
-    mp3_path: str, beats_per_bar: str | None = None, span: bool = False,
+    mp3_path: str,
+    beats_per_bar: str | None = None,
+    span: bool = False,
+    min_bpm: str | None = None,
+    max_bpm: str | None = None,
 ) -> tuple[str, str]:
     """Run DBNDownBeatTracker and write beats/bars grid files.
 
@@ -63,7 +76,9 @@ def gen_grids(
     beats_path = directory / f"beats_{songname}.txt"
     bars_path = directory / f"bars_{songname}.txt"
 
-    cmd = _build_dbn_command(str(mp3), beats_per_bar=beats_per_bar)
+    cmd = _build_dbn_command(
+        str(mp3), beats_per_bar=beats_per_bar, min_bpm=min_bpm, max_bpm=max_bpm,
+    )
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
@@ -109,6 +124,14 @@ if __name__ == "__main__":
         "-s", "--span", action="store_true",
         help="Emit duration labels (start...end). Default: zero-duration events at each downbeat.",
     )
+    parser.add_argument(
+        "--min-bpm", default=None,
+        help="Minimum tempo for DBN (forwarded to --min_bpm). Default: DBN's 55.",
+    )
+    parser.add_argument(
+        "--max-bpm", default=None,
+        help="Maximum tempo for DBN (forwarded to --max_bpm). Default: DBN's 215.",
+    )
     args = parser.parse_args()
 
     mp3 = Path(args.mp3)
@@ -116,4 +139,10 @@ if __name__ == "__main__":
         print(f"Error: file not found: {mp3}", file=sys.stderr)
         sys.exit(1)
 
-    gen_grids(str(mp3), beats_per_bar=args.beats_per_bar, span=args.span)
+    gen_grids(
+        str(mp3),
+        beats_per_bar=args.beats_per_bar,
+        span=args.span,
+        min_bpm=args.min_bpm,
+        max_bpm=args.max_bpm,
+    )

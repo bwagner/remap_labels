@@ -48,6 +48,35 @@ def test_build_command_flag_placed_before_subcommand():
     )
 
 
+def test_build_command_min_bpm():
+    from gen_grids import _build_dbn_command
+
+    cmd = _build_dbn_command("song.mp3", min_bpm="130")
+    assert cmd == ["DBNDownBeatTracker", "--min_bpm", "130", "single", "song.mp3"]
+
+
+def test_build_command_max_bpm():
+    from gen_grids import _build_dbn_command
+
+    cmd = _build_dbn_command("song.mp3", max_bpm="160")
+    assert cmd == ["DBNDownBeatTracker", "--max_bpm", "160", "single", "song.mp3"]
+
+
+def test_build_command_all_flags_before_subcommand():
+    from gen_grids import _build_dbn_command
+
+    cmd = _build_dbn_command(
+        "song.mp3", beats_per_bar="4", min_bpm="130", max_bpm="160",
+    )
+    assert cmd == [
+        "DBNDownBeatTracker",
+        "--beats_per_bar", "4",
+        "--min_bpm", "130",
+        "--max_bpm", "160",
+        "single", "song.mp3",
+    ]
+
+
 def test_format_bars_event_mode_default():
     from gen_grids import _format_bars
 
