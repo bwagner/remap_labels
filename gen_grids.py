@@ -25,6 +25,21 @@ import subprocess
 import sys
 from pathlib import Path
 
+AUDIO_EXTS = {".mp3", ".m4a", ".opus", ".wav", ".flac", ".ogg", ".aac", ".wma"}
+
+
+def _discover_audio_file(directory: Path) -> Path:
+    """Find the unique audio file in a directory. Raises ValueError on 0 or >1."""
+    matches = sorted(
+        p for p in directory.iterdir() if p.suffix.lower() in AUDIO_EXTS
+    )
+    if not matches:
+        raise ValueError(f"no audio file in {directory}")
+    if len(matches) > 1:
+        names = ", ".join(p.name for p in matches)
+        raise ValueError(f"multiple audio files in {directory}: {names}")
+    return matches[0]
+
 
 def _build_dbn_command(
     mp3_path: str,
@@ -111,7 +126,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Generate beats and bars grid files from an audio file.",
     )
-    parser.add_argument("mp3", help="Audio file (mp3, m4a, opus, wav, flac, ...)")
+    parser.add_argument(
+        "mp3",
+        help="Audio file (mp3, m4a, opus, wav, flac, ...) or directory containing one",
+    )
     parser.add_argument(
         "-b", "--beats-per-bar", default=None,
         help=(
@@ -136,8 +154,16 @@ if __name__ == "__main__":
 
     mp3 = Path(args.mp3)
     if not mp3.exists():
-        print(f"Error: file not found: {mp3}", file=sys.stderr)
+        print(f"Error: not found: {mp3}", file=sys.stderr)
         sys.exit(1)
+
+    if mp3.is_dir():
+        try:
+            mp3 = _discover_audio_file(mp3)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Dir-mode: discovered audio {mp3}")
 
     gen_grids(
         str(mp3),

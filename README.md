@@ -48,9 +48,10 @@ The process has three stages: generate new beat/bar grids, run the remapper, imp
 ```bash
 gen_grids.py new_audio.mp3
 gen_grids.py new_audio.m4a     # any format madmom/ffmpeg can decode
+gen_grids.py new_song_dir/     # directory containing one audio file
 ```
 
-Runs DBNDownBeatTracker and creates `beats_<songname>.txt` and `bars_<songname>.txt` in the same directory as the audio file.
+Runs DBNDownBeatTracker and creates `beats_<songname>.txt` and `bars_<songname>.txt` next to the audio file. In dir-mode the directory must contain exactly one audio file (error on zero or more than one).
 
 For non-4/4 songs, pass `--beats-per-bar` (forwarded verbatim to DBN's `--beats_per_bar`):
 

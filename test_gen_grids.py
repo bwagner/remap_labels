@@ -77,6 +77,52 @@ def test_build_command_all_flags_before_subcommand():
     ]
 
 
+class TestDiscoverAudioFile:
+    """gen_grids dir-mode: find the unique audio file in a directory."""
+
+    def test_finds_unique_audio(self, tmp_path):
+        from gen_grids import _discover_audio_file
+
+        audio = tmp_path / "song.mp3"
+        audio.write_text("")
+        (tmp_path / "notes.txt").write_text("")
+        assert _discover_audio_file(tmp_path) == audio
+
+    def test_zero_audio_errors(self, tmp_path):
+        from gen_grids import _discover_audio_file
+
+        (tmp_path / "notes.txt").write_text("")
+        with pytest.raises(ValueError, match="no audio"):
+            _discover_audio_file(tmp_path)
+
+    def test_multiple_audio_errors(self, tmp_path):
+        from gen_grids import _discover_audio_file
+
+        (tmp_path / "a.mp3").write_text("")
+        (tmp_path / "b.opus").write_text("")
+        with pytest.raises(ValueError, match="multiple audio"):
+            _discover_audio_file(tmp_path)
+
+    def test_ignores_non_audio_files(self, tmp_path):
+        from gen_grids import _discover_audio_file
+
+        audio = tmp_path / "song.m4a"
+        audio.write_text("")
+        for unrelated in ("beats_song.txt", "song.aup3", "song.pdf"):
+            (tmp_path / unrelated).write_text("")
+        assert _discover_audio_file(tmp_path) == audio
+
+    def test_all_audio_exts_recognized(self, tmp_path):
+        from gen_grids import _discover_audio_file
+
+        for ext in ("mp3", "m4a", "opus", "wav", "flac", "ogg", "aac", "wma"):
+            sub = tmp_path / ext
+            sub.mkdir()
+            audio = sub / f"x.{ext}"
+            audio.write_text("")
+            assert _discover_audio_file(sub) == audio
+
+
 def test_format_bars_event_mode_default():
     from gen_grids import _format_bars
 
